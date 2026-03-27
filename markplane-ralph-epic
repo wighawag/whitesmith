@@ -310,15 +310,17 @@ get_completed_epic_branches() {
     # The pattern captures everything up to the second hyphen after "epic-"
     # Branch format: ralph/epic-EPIC-001-user-authentication
     #                           ^^^^^^^^^^ <- this is what we capture
-    # Then filter out the in-progress epic (if any)
-    git branch -a 2>/dev/null | grep "${BRANCH_PREFIX}/epic-" | \
+    local all_epics
+    all_epics=$(git branch -a 2>/dev/null | grep "${BRANCH_PREFIX}/epic-" | \
         sed "s|.*${BRANCH_PREFIX}/epic-\([A-Za-z]*-[0-9]*\)-.*|\1|" | \
-        sort -u | \
-        if [ -n "$in_progress_epic" ]; then
-            grep -v "^${in_progress_epic}$"
-        else
-            cat
-        fi
+        sort -u)
+    
+    # Filter out the in-progress epic (if any)
+    if [ -n "$in_progress_epic" ] && [ -n "$all_epics" ]; then
+        echo "$all_epics" | grep -v "^${in_progress_epic}$"
+    else
+        echo "$all_epics"
+    fi
 }
 
 # Function to discover next epic (calls Claude in discovery mode)

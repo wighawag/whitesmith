@@ -259,6 +259,60 @@ fi
 echo ""
 
 # ============================================
+# TEST 4: Max iterations reached should not cause syntax error
+# ============================================
+echo "=== TEST 4: Max iterations reached should complete without errors ==="
+echo ""
+
+# Create a fresh test directory
+TEST_DIR4=$(mktemp -d)
+cd "$TEST_DIR4"
+git init
+git config user.email "test@example.com"
+git config user.name "Test User"
+
+mkdir -p src
+echo "# Test Project" > README.md
+git add .
+git commit -m "Initial commit"
+git branch -M main
+
+rm -f .ralph-epic-state
+rm -f .mock-agent-state
+
+# Run with exactly 2 iterations to test iteration limit behavior
+# The script should run 2 iterations and exit gracefully
+OUTPUT4=$("$RALPH_SCRIPT" \
+    --agent-cmd "$MOCK_AGENT" \
+    --max-iterations 2 \
+    --no-push \
+    --no-sleep \
+    "$TEST_DIR4" 2>&1)
+EXIT_CODE4=$?
+
+echo "$OUTPUT4"
+echo ""
+echo "Exit code: $EXIT_CODE4"
+echo ""
+
+# Check for syntax errors
+if echo "$OUTPUT4" | grep -q "syntax error"; then
+    echo "❌ TEST 4 FAILED: Syntax error detected"
+    FAILED=$((FAILED + 1))
+elif [ $EXIT_CODE4 -ne 0 ]; then
+    echo "❌ TEST 4 FAILED: Script exited with error code $EXIT_CODE4"
+    FAILED=$((FAILED + 1))
+elif echo "$OUTPUT4" | grep -q "Iteration limit reached"; then
+    echo "✅ TEST 4 PASSED: Max iterations reached without errors"
+    PASSED=$((PASSED + 1))
+else
+    echo "⚠️ TEST 4 INCONCLUSIVE: Could not verify behavior"
+    FAILED=$((FAILED + 1))
+fi
+
+echo ""
+
+# ============================================
 # Summary
 # ============================================
 echo "=========================================="
@@ -269,8 +323,9 @@ echo "Test directories:"
 echo "  - $TEST_DIR"
 echo "  - $TEST_DIR2"
 echo "  - $TEST_DIR3"
+echo "  - $TEST_DIR4"
 echo ""
-echo "To clean up: rm -rf $TEST_DIR $TEST_DIR2 $TEST_DIR3"
+echo "To clean up: rm -rf $TEST_DIR $TEST_DIR2 $TEST_DIR3 $TEST_DIR4"
 
 if [ $FAILED -gt 0 ]; then
     exit 1
