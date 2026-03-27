@@ -416,13 +416,17 @@ MANDATORY: After completing ANY task, you MUST commit your changes.
 Uncommitted work = incomplete work.
 
 WORKFLOW:
-1. Find the first incomplete task in this epic using markplane
-2. Implement it following the specs
-3. Check the acceptance criteria
-4. If they pass, update the task status using markplane
-5. Run: markplane sync
-6. COMMIT your changes: git add . && git commit -m 'feat($EPIC_ID): <description>'
-7. If all tasks IN THIS EPIC are now done:
+1. First, mark the epic as 'in-progress' using markplane (if not already):
+   markplane epic status $EPIC_ID in-progress
+2. Find the first incomplete task in this epic using markplane
+3. Implement it following the specs
+4. Check the acceptance criteria
+5. If they pass, update the task status using markplane
+6. Run: markplane sync
+7. COMMIT your changes: git add . ':!.ralph-epic-state' && git commit -m 'feat($EPIC_ID): <description>'
+8. If all tasks IN THIS EPIC are now done:
+   - Mark the epic as 'done': markplane epic status $EPIC_ID done
+   - Run: markplane sync
    - Write: $EPIC_COMPLETE_SIGNAL
    - Provide a PR description:
      PR_DESCRIPTION_START
@@ -433,9 +437,10 @@ IMPORTANT:
 - One task per iteration
 - You MUST commit after completing the task
 - Do NOT switch branches - stay on $BRANCH_NAME
+- Always update epic status: 'in-progress' when starting, 'done' when all tasks complete
 
 FINAL CHECK: Did you commit? If not, do it now:
-git add . && git commit -m 'feat($EPIC_ID): <description>'"
+git add . ':!.ralph-epic-state' && git commit -m 'feat($EPIC_ID): <description>'"
 
     OUTPUT=$(run_agent "$WORK_PROMPT")
     EXIT_CODE=$?
@@ -455,7 +460,7 @@ git add . && git commit -m 'feat($EPIC_ID): <description>'"
     # STEP 5: Commit any uncommitted changes (safety net)
     if ! git diff --quiet || ! git diff --cached --quiet; then
         echo "Found uncommitted changes - committing as safety net"
-        git add .
+        git add . ':!.ralph-epic-state'
         git commit -m "feat($EPIC_ID): implement task (auto-commit)"
     fi
     
