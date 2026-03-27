@@ -419,12 +419,15 @@ WORKFLOW:
 1. First, mark the epic as 'in-progress' using markplane (if not already):
    markplane epic status $EPIC_ID in-progress
 2. Find the first incomplete task in this epic using markplane
-3. Implement it following the specs
-4. Check the acceptance criteria
-5. If they pass, update the task status using markplane
-6. Run: markplane sync
-7. COMMIT your changes: git add . ':!.ralph-epic-state' && git commit -m 'feat($EPIC_ID): <description>'
-8. If all tasks IN THIS EPIC are now done:
+3. Mark the task as 'in-progress':
+   markplane task status <TASK_ID> in-progress
+4. Implement it following the specs
+5. Check the acceptance criteria
+6. If they pass, mark the task as 'done':
+   markplane task status <TASK_ID> done
+7. Run: markplane sync
+8. COMMIT your changes: git add . ':!.ralph-epic-state' && git commit -m 'feat($EPIC_ID): <description>'
+9. If all tasks IN THIS EPIC are now done:
    - Mark the epic as 'done': markplane epic status $EPIC_ID done
    - Run: markplane sync
    - Write: $EPIC_COMPLETE_SIGNAL
@@ -437,7 +440,7 @@ IMPORTANT:
 - One task per iteration
 - You MUST commit after completing the task
 - Do NOT switch branches - stay on $BRANCH_NAME
-- Always update epic status: 'in-progress' when starting, 'done' when all tasks complete
+- Always update status: epic and task to 'in-progress' when starting, 'done' when complete
 
 FINAL CHECK: Did you commit? If not, do it now:
 git add . ':!.ralph-epic-state' && git commit -m 'feat($EPIC_ID): <description>'"
