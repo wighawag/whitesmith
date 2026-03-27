@@ -1,0 +1,72 @@
+#!/bin/bash
+# markplane-ralph - Autonomous Coding Agent
+# Usage: markplane-ralph <work_dir> [max_iterations]
+
+WORK_DIR=${1:-.}
+MAX_ITERATIONS=${2:-50}
+ITERATION=0
+COMPLETE_SIGNAL="RALPH_COMPLETE"
+
+# Validate and change to work directory
+if [ ! -d "$WORK_DIR" ]; then
+    echo "ERROR: Directory '$WORK_DIR' does not exist"
+    exit 1
+fi
+cd "$WORK_DIR" || exit 1
+
+echo "=== Ralph Wiggum Coding Agent ==="
+echo "Working directory: $(pwd)"
+echo "Max iterations: $MAX_ITERATIONS"
+echo "Stop signal: $COMPLETE_SIGNAL"
+echo ""
+
+while [ $ITERATION -lt $MAX_ITERATIONS ]; do
+    ITERATION=$((ITERATION + 1))
+    echo "--- Iteration $ITERATION of $MAX_ITERATIONS ---"
+
+    # Call Claude Code with the work prompt
+    OUTPUT=$(claude -p "
+You are an autonomous coding agent that use markplane for finding epic to work on, task to implements.
+
+INSTRUCTIONS:
+1. Choose the first task that is not done yet
+2. Implement it following the specs
+3. Check the acceptance criteria
+4. If they pass, update the task.
+5. sync markplane
+6. Add notes
+7. create or update any task if you think it matter
+8. Commit: git add . && git commit -m 'feat: [description]'
+9. If all tasks are done, write: $COMPLETE_SIGNAL
+
+IMPORTANT: One task per iteration. Small, atomic commits.
+" 2>&1)
+    EXIT_CODE=$?
+    if [ $EXIT_CODE -ne 0 ]; then
+        echo "ERROR: Claude command failed with exit code $EXIT_CODE"
+        echo "$OUTPUT"
+        exit 1
+    fi
+
+    echo "$OUTPUT"
+
+    # Check for completion signal
+    if echo "$OUTPUT" | grep -q "$COMPLETE_SIGNAL"; then
+        echo ""
+        echo "=== PRD COMPLETED! ==="
+        echo "All tasks have been implemented."
+
+        # Optional notification (uncomment to enable)
+        # curl -X POST "https://api.pushover.net/1/messages.json" \
+        #   -d "token=YOUR_TOKEN&user=YOUR_USER&message=Ralph completed the PRD!"
+
+        exit 0
+    fi
+
+    # Pause between iterations (avoid rate limiting)
+    sleep 5
+done
+
+echo ""
+echo "=== Iteration limit reached ==="
+echo "Check markplane for current status."
