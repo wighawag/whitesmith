@@ -153,7 +153,7 @@ while [ $ITERATION -lt $MAX_ITERATIONS ]; do
     echo "--- Iteration $ITERATION of $MAX_ITERATIONS ---"
 
     # Call Claude Code with the epic-aware work prompt
-    OUTPUT=$(claude --allow-dangerously-skip-permissions  -p "
+    OUTPUT=$(claude --dangerously-skip-permissions  -p "
 You are an autonomous coding agent that uses markplane for finding epics and tasks.
 
 EPIC-BASED WORKFLOW:
