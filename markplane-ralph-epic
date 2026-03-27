@@ -1,17 +1,72 @@
 #!/bin/bash
 # markplane-ralph-epic - Autonomous Coding Agent with Epic-based Branching
-# Usage: markplane-ralph-epic <work_dir> [max_iterations]
+# Usage: markplane-ralph-epic [options] <work_dir>
+#
+# Options:
+#   --agent-cmd <cmd>    Command to run the agent (default: "claude --dangerously-skip-permissions -p")
+#   --max-iterations <n> Maximum iterations (default: 50)
+#   --branch-prefix <p>  Branch prefix (default: "ralph")
+#   --no-push            Skip pushing branches and creating PRs
+#   --no-sleep           Skip sleep between iterations (for testing)
+#   --help               Show this help
 #
 # This script creates separate branches for each epic.
 # If an epic depends on another, it branches from the dependency.
 # Each epic gets its own PR when complete.
 
-WORK_DIR=${1:-.}
-MAX_ITERATIONS=${2:-50}
+# Default values
+WORK_DIR=""
+MAX_ITERATIONS=50
+AGENT_CMD='claude --dangerously-skip-permissions -p'
+BRANCH_PREFIX="ralph"
+NO_PUSH=false
+NO_SLEEP=false
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --agent-cmd)
+            AGENT_CMD="$2"
+            shift 2
+            ;;
+        --max-iterations)
+            MAX_ITERATIONS="$2"
+            shift 2
+            ;;
+        --branch-prefix)
+            BRANCH_PREFIX="$2"
+            shift 2
+            ;;
+        --no-push)
+            NO_PUSH=true
+            shift
+            ;;
+        --no-sleep)
+            NO_SLEEP=true
+            shift
+            ;;
+        --help)
+            head -20 "$0" | tail -n +2 | sed 's/^# //'
+            exit 0
+            ;;
+        -*)
+            echo "ERROR: Unknown option $1"
+            exit 1
+            ;;
+        *)
+            WORK_DIR="$1"
+            shift
+            ;;
+    esac
+done
+
+# Default work dir to current directory
+WORK_DIR=${WORK_DIR:-.}
+
 ITERATION=0
 COMPLETE_SIGNAL="RALPH_COMPLETE"
 EPIC_COMPLETE_SIGNAL="EPIC_COMPLETE"
-BRANCH_PREFIX="ralph"
+STATE_FILE=".ralph-epic-state"
 
 # Validate and change to work directory
 if [ ! -d "$WORK_DIR" ]; then
@@ -24,33 +79,75 @@ echo "=== Ralph Wiggum Coding Agent (Epic Mode) ==="
 echo "Working directory: $(pwd)"
 echo "Max iterations: $MAX_ITERATIONS"
 echo "Branch prefix: $BRANCH_PREFIX"
+echo "Agent command: $AGENT_CMD"
+echo "No push mode: $NO_PUSH"
 echo ""
 
-# Fetch latest from origin
-git fetch origin main || {
-    echo "ERROR: Failed to fetch from origin"
-    exit 1
-}
+# Fetch latest from origin (skip if no remote or in test mode)
+if git remote | grep -q origin; then
+    git fetch origin main 2>/dev/null || echo "WARNING: Could not fetch from origin"
+fi
 
 # Function to sanitize epic name for branch name
 sanitize_branch_name() {
     echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//'
 }
 
+# Function to save state
+save_state() {
+    local epic_id="$1"
+    local epic_name="$2"
+    local depends_on="$3"
+    # Quote values to handle spaces
+    cat > "$STATE_FILE" << EOF
+SAVED_EPIC_ID="$epic_id"
+SAVED_EPIC_NAME="$epic_name"
+SAVED_DEPENDS_ON="$depends_on"
+EOF
+    echo "State saved: epic=$epic_id"
+}
+
+# Function to load state
+load_state() {
+    if [ -f "$STATE_FILE" ]; then
+        source "$STATE_FILE"
+        echo "State loaded: epic=$SAVED_EPIC_ID"
+        return 0
+    fi
+    return 1
+}
+
+# Function to clear state
+clear_state() {
+    rm -f "$STATE_FILE"
+    SAVED_EPIC_ID=""
+    SAVED_EPIC_NAME=""
+    SAVED_DEPENDS_ON=""
+    echo "State cleared"
+}
+
 # Global variable to hold the current epic branch name
 CURRENT_EPIC_BRANCH=""
 
 # Function to get or create branch for an epic
-# Sets CURRENT_EPIC_BRANCH global variable instead of echoing
+# Sets CURRENT_EPIC_BRANCH global variable
 setup_epic_branch() {
     local epic_id="$1"
     local epic_name="$2"
-    local depends_on="$3"  # Epic ID this depends on (empty if none)
+    local depends_on="$3"
     
     local branch_name="${BRANCH_PREFIX}/epic-${epic_id}-$(sanitize_branch_name "$epic_name")"
     
     echo "Setting up branch for epic: $epic_name"
     echo "Branch name: $branch_name"
+    
+    # Check if we're already on this branch
+    local current_branch=$(git branch --show-current)
+    if [ "$current_branch" = "$branch_name" ]; then
+        echo "Already on correct branch: $branch_name"
+        CURRENT_EPIC_BRANCH="$branch_name"
+        return 0
+    fi
     
     # Check if branch exists
     if git show-ref --verify --quiet "refs/heads/$branch_name"; then
@@ -60,8 +157,12 @@ setup_epic_branch() {
             return 1
         }
     else
-        # Determine base branch
-        local base_branch="origin/main"
+        # Determine base branch (prefer origin/main, fall back to main)
+        local base_branch="main"
+        if git show-ref --verify --quiet "refs/remotes/origin/main"; then
+            base_branch="origin/main"
+        fi
+        
         if [ -n "$depends_on" ]; then
             # Find the branch for the dependency
             local dep_branch=$(git branch -a | grep "${BRANCH_PREFIX}/epic-${depends_on}-" | head -1 | tr -d ' *')
@@ -69,7 +170,7 @@ setup_epic_branch() {
                 base_branch="$dep_branch"
                 echo "Branching from dependency: $base_branch"
             else
-                echo "WARNING: Dependency branch not found, using main"
+                echo "WARNING: Dependency branch not found, using $base_branch"
             fi
         fi
         
@@ -80,34 +181,25 @@ setup_epic_branch() {
         }
     fi
     
-    # If branch exists, try to merge from its base
-    if [ -n "$depends_on" ]; then
-        local dep_branch=$(git branch -a | grep "${BRANCH_PREFIX}/epic-${depends_on}-" | head -1 | tr -d ' *')
-        if [ -n "$dep_branch" ]; then
-            echo "Merging latest from dependency branch..."
-            git merge "$dep_branch" -m "Merge dependency into $branch_name" || {
-                echo "WARNING: Merge conflict with dependency. Please resolve manually."
-                return 1
-            }
-        fi
-    else
-        echo "Merging latest from main..."
-        git merge origin/main -m "Merge main into $branch_name" || {
-            echo "WARNING: Merge conflict with main. Please resolve manually."
-            return 1
-        }
-    fi
-    
-    # Set global variable instead of echoing
+    # Set global variable
     CURRENT_EPIC_BRANCH="$branch_name"
     return 0
 }
 
 # Function to create PR for an epic
+# $4 = pr_description (optional, from Claude)
 create_epic_pr() {
     local branch_name="$1"
     local epic_name="$2"
     local depends_on="$3"
+    local pr_description="$4"
+    
+    # Skip push and PR creation if --no-push was specified
+    if [ "$NO_PUSH" = true ]; then
+        echo "Skipping push and PR creation (--no-push mode)"
+        echo "Branch '$branch_name' is ready for manual push"
+        return 0
+    fi
     
     echo "Pushing branch '$branch_name' to origin..."
     git push -u origin "$branch_name" || {
@@ -124,13 +216,15 @@ create_epic_pr() {
         fi
     fi
     
-    echo "Creating Pull Request (base: $base_branch)..."
-    if command -v gh &> /dev/null; then
-        gh pr create --base "$base_branch" --head "$branch_name" \
-            --title "feat: $epic_name" \
-            --body "Automated PR created by Ralph autonomous coding agent.
+    # Use Claude's description if provided, otherwise use default
+    local body
+    if [ -n "$pr_description" ]; then
+        body="$pr_description
 
-## Epic: $epic_name
+---
+*Automated PR created by Ralph autonomous coding agent.*"
+    else
+        body="## Epic: $epic_name
 
 ## Changes
 This PR contains all tasks completed for this epic.
@@ -139,7 +233,17 @@ This PR contains all tasks completed for this epic.
 $([ -n "$depends_on" ] && echo "This PR depends on the PR for epic $depends_on" || echo "No dependencies - can be merged directly to main")
 
 ## Review
-Please review the changes and merge when ready." || {
+Please review the changes and merge when ready.
+
+---
+*Automated PR created by Ralph autonomous coding agent.*"
+    fi
+    
+    echo "Creating Pull Request (base: $base_branch)..."
+    if command -v gh &> /dev/null; then
+        gh pr create --base "$base_branch" --head "$branch_name" \
+            --title "feat: $epic_name" \
+            --body "$body" || {
             echo "WARNING: Failed to create PR. You may need to create it manually."
             return 1
         }
@@ -157,33 +261,85 @@ while [ $ITERATION -lt $MAX_ITERATIONS ]; do
     ITERATION=$((ITERATION + 1))
     echo "--- Iteration $ITERATION of $MAX_ITERATIONS ---"
 
-    # Call Claude Code with the epic-aware work prompt
-    OUTPUT=$(claude --dangerously-skip-permissions  -p "
-You are an autonomous coding agent that uses markplane for finding epics and tasks.
+    # STEP 1: Load saved state and checkout branch BEFORE calling Claude
+    ON_CORRECT_BRANCH=false
+    if load_state && [ -n "$SAVED_EPIC_ID" ]; then
+        echo "Resuming work on epic: $SAVED_EPIC_ID"
+        setup_epic_branch "$SAVED_EPIC_ID" "$SAVED_EPIC_NAME" "$SAVED_DEPENDS_ON"
+        if [ $? -ne 0 ]; then
+            echo "ERROR: Failed to setup epic branch from saved state"
+            exit 1
+        fi
+        ON_CORRECT_BRANCH=true
+    else
+        echo "No saved state - will determine epic from Claude"
+    fi
+
+    # STEP 2: Build prompt based on whether we're on the correct branch
+    # When on correct branch: Claude can commit directly
+    # When not on correct branch: Claude should NOT commit (script handles after branch setup)
+    if [ "$ON_CORRECT_BRANCH" = true ]; then
+        PROMPT="You are an autonomous coding agent that uses markplane for finding epics and tasks.
+You are currently working on epic: $SAVED_EPIC_ID ($SAVED_EPIC_NAME)
+
+WORKFLOW:
+1. Report the epic info (for verification):
+   EPIC_ID: $SAVED_EPIC_ID
+   EPIC_NAME: $SAVED_EPIC_NAME
+   DEPENDS_ON: $SAVED_DEPENDS_ON
+2. Work on the first incomplete task in this epic
+3. Implement it following the specs
+4. Check the acceptance criteria
+5. If they pass, update the task status using markplane
+6. Run: markplane sync
+7. Commit your changes with a descriptive message:
+   git add . && git commit -m 'feat($SAVED_EPIC_ID): <description of what you implemented>'
+8. If all tasks IN THIS EPIC are done:
+   - Write: $EPIC_COMPLETE_SIGNAL
+   - Provide a PR description in this format:
+     PR_DESCRIPTION_START
+     <your detailed PR description here, explaining all changes made in this epic>
+     PR_DESCRIPTION_END
+9. If ALL epics are done, write: $COMPLETE_SIGNAL
+
+IMPORTANT:
+- One task per iteration
+- Write meaningful commit messages
+- You CAN and SHOULD commit your changes"
+    else
+        PROMPT="You are an autonomous coding agent that uses markplane for finding epics and tasks.
 
 EPIC-BASED WORKFLOW:
 1. List all epics and their dependencies using markplane
 2. Find the first epic that:
    - Is not complete
    - Has all its dependencies (other epics) completed
-3. Report the epic info in this exact format (one line each):
+3. Report the epic info in this exact format (one line each, at the START of your response):
    EPIC_ID: <id>
    EPIC_NAME: <name>
    DEPENDS_ON: <dependency_epic_id or empty>
 4. Work on the first incomplete task in that epic
 5. Implement it following the specs
 6. Check the acceptance criteria
-7. If they pass, update the task
-8. Sync markplane
-9. Commit: git add . && git commit -m 'feat(<epic-id>): [description]'
-10. If all tasks IN THIS EPIC are done, write: $EPIC_COMPLETE_SIGNAL
+7. If they pass, update the task status using markplane
+8. Run: markplane sync
+9. DO NOT COMMIT - the outer script will handle git commits after setting up the branch
+10. If all tasks IN THIS EPIC are done:
+    - Write: $EPIC_COMPLETE_SIGNAL
+    - Provide a PR description in this format:
+      PR_DESCRIPTION_START
+      <your detailed PR description here>
+      PR_DESCRIPTION_END
 11. If ALL epics are done, write: $COMPLETE_SIGNAL
 
-IMPORTANT: 
+IMPORTANT:
 - One task per iteration
-- Small, atomic commits
-- Always report EPIC_ID, EPIC_NAME, and DEPENDS_ON before working
-" 2>&1)
+- DO NOT run git commit on this iteration (script handles branch setup first)
+- Always report EPIC_ID, EPIC_NAME, and DEPENDS_ON at the START before working"
+    fi
+
+    # Call agent with prompt
+    OUTPUT=$(eval "$AGENT_CMD" '"$PROMPT"' 2>&1)
     EXIT_CODE=$?
     if [ $EXIT_CODE -ne 0 ]; then
         echo "ERROR: Claude command failed with exit code $EXIT_CODE"
@@ -193,43 +349,63 @@ IMPORTANT:
 
     echo "$OUTPUT"
 
-    # Extract epic information (more flexible regex to handle whitespace/formatting)
+    # STEP 3: Extract epic information from Claude's output
     EPIC_ID=$(echo "$OUTPUT" | grep -E "^[[:space:]]*EPIC_ID:" | head -1 | sed 's/.*EPIC_ID:[[:space:]]*//')
     EPIC_NAME=$(echo "$OUTPUT" | grep -E "^[[:space:]]*EPIC_NAME:" | head -1 | sed 's/.*EPIC_NAME:[[:space:]]*//')
     DEPENDS_ON=$(echo "$OUTPUT" | grep -E "^[[:space:]]*DEPENDS_ON:" | head -1 | sed 's/.*DEPENDS_ON:[[:space:]]*//')
+    
+    # Extract PR description if provided
+    PR_DESCRIPTION=$(echo "$OUTPUT" | sed -n '/PR_DESCRIPTION_START/,/PR_DESCRIPTION_END/p' | sed '1d;$d')
 
-    # Setup branch if we have epic info
-    if [ -n "$EPIC_ID" ] && [ -n "$EPIC_NAME" ]; then
+    # STEP 4: Handle branch setup for new epics (when we weren't on correct branch)
+    if [ "$ON_CORRECT_BRANCH" = false ] && [ -n "$EPIC_ID" ] && [ -n "$EPIC_NAME" ]; then
+        # Setup branch for the new epic
         setup_epic_branch "$EPIC_ID" "$EPIC_NAME" "$DEPENDS_ON"
         if [ $? -ne 0 ]; then
             echo "ERROR: Failed to setup epic branch"
             exit 1
         fi
-        # CURRENT_EPIC_BRANCH is now set by the function
+        
+        # Save state for next iteration
+        save_state "$EPIC_ID" "$EPIC_NAME" "$DEPENDS_ON"
+        
+        # Commit any changes Claude made (now on correct branch)
+        if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "Committing changes to branch: $CURRENT_EPIC_BRANCH"
+            git add .
+            git commit -m "feat($EPIC_ID): implement task"
+        fi
+    elif [ "$ON_CORRECT_BRANCH" = true ]; then
+        # Already on correct branch, Claude should have committed
+        # Just update state in case epic info changed
+        if [ -n "$EPIC_ID" ] && [ -n "$EPIC_NAME" ]; then
+            save_state "$EPIC_ID" "$EPIC_NAME" "$DEPENDS_ON"
+        fi
     fi
 
-    # Check for epic completion signal
+    # STEP 5: Check for epic completion signal
     if echo "$OUTPUT" | grep -q "$EPIC_COMPLETE_SIGNAL"; then
         echo ""
         echo "=== EPIC COMPLETED: $EPIC_NAME ==="
         
-        # Check for uncommitted changes and commit them
+        # Ensure all changes are committed
         if ! git diff --quiet || ! git diff --cached --quiet; then
-            echo "WARNING: Uncommitted changes detected. Committing them now..."
+            echo "Committing final changes..."
             git add .
-            git commit -m "feat($EPIC_ID): final changes for epic completion"
+            git commit -m "feat($EPIC_ID): complete epic"
         fi
         
         CURRENT_BRANCH=$(git branch --show-current)
-        create_epic_pr "$CURRENT_BRANCH" "$EPIC_NAME" "$DEPENDS_ON"
+        create_epic_pr "$CURRENT_BRANCH" "$EPIC_NAME" "$DEPENDS_ON" "$PR_DESCRIPTION"
+        
+        # Clear state so next iteration finds the next epic
+        clear_state
         
         echo "Moving to next epic..."
-        # Note: setup_epic_branch will handle correct base branch for next epic
-        # (dependency branch if depends_on is set, otherwise origin/main)
         echo ""
     fi
 
-    # Check for full completion signal
+    # STEP 7: Check for full completion signal
     if echo "$OUTPUT" | grep -q "$COMPLETE_SIGNAL"; then
         echo ""
         echo "=== ALL EPICS COMPLETED! ==="
@@ -237,17 +413,19 @@ IMPORTANT:
         echo ""
         echo "Created PRs:"
         if command -v gh &> /dev/null; then
-            # Use --search to find PRs with branches starting with the prefix
             gh pr list --search "head:${BRANCH_PREFIX}/epic-"
         else
             echo "Use 'gh pr list' to see all Ralph PRs"
         fi
-
+        
+        clear_state
         exit 0
     fi
 
     # Pause between iterations (avoid rate limiting)
-    sleep 5
+    if [ "$NO_SLEEP" = false ]; then
+        sleep 5
+    fi
 done
 
 echo ""
