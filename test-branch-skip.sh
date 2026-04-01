@@ -3,19 +3,38 @@
 # This tests the fix for the infinite loop issue where completed epics
 # were being rediscovered because their status updates were on the branch,
 # not on main.
+#
+# Usage: test-branch-skip.sh [--typescript]
+#   --typescript  Test the TypeScript implementation (src/index.ts)
+#   (default)     Test the bash implementation (markplane-ralph-epic)
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOCK_AGENT="$SCRIPT_DIR/mock-agent.sh"
-RALPH_SCRIPT="$SCRIPT_DIR/markplane-ralph-epic"
 TEST_DIR=$(mktemp -d)
 PASSED=0
 FAILED=0
 
+# Check for --typescript flag
+USE_TYPESCRIPT=false
+if [ "$1" = "--typescript" ] || [ "$1" = "-ts" ]; then
+    USE_TYPESCRIPT=true
+fi
+
+# Determine which implementation to test
+if [ "$USE_TYPESCRIPT" = true ]; then
+    RALPH_SCRIPT="npx tsx $SCRIPT_DIR/src/index.ts"
+    IMPL_NAME="TypeScript (src/index.ts)"
+else
+    RALPH_SCRIPT="$SCRIPT_DIR/markplane-ralph-epic"
+    IMPL_NAME="Bash (markplane-ralph-epic)"
+fi
+
 echo "=== Test: Branch Skip Behavior ==="
 echo "Script directory: $SCRIPT_DIR"
 echo "Test directory: $TEST_DIR"
+echo "Implementation: $IMPL_NAME"
 echo ""
 
 # Verify scripts exist
@@ -26,7 +45,9 @@ fi
 
 # Make scripts executable
 chmod +x "$MOCK_AGENT"
-chmod +x "$RALPH_SCRIPT"
+if [ "$USE_TYPESCRIPT" = false ]; then
+    chmod +x "$SCRIPT_DIR/markplane-ralph-epic"
+fi
 
 # ============================================
 # TEST 1: Epic with branch should be skipped
@@ -77,12 +98,12 @@ echo "Running ralph-epic with 1 iteration to test discovery..."
 echo ""
 
 # Capture the output
-OUTPUT=$("$RALPH_SCRIPT" \
-    --agent-cmd "$MOCK_AGENT" \
+OUTPUT=$(eval "$RALPH_SCRIPT" \
+    --agent-cmd '"$MOCK_AGENT"' \
     --max-iterations 1 \
     --no-push \
     --no-sleep \
-    "$TEST_DIR" 2>&1) || true
+    '"$TEST_DIR"' 2>&1) || true
 
 echo "$OUTPUT"
 echo ""
@@ -179,12 +200,12 @@ echo "DEPENDS_ON: EPIC-002"
 MOCKEOF
 chmod +x "$TEST_DIR2/test-mock.sh"
 
-OUTPUT2=$("$RALPH_SCRIPT" \
-    --agent-cmd "$TEST_DIR2/test-mock.sh" \
+OUTPUT2=$(eval "$RALPH_SCRIPT" \
+    --agent-cmd '"$TEST_DIR2/test-mock.sh"' \
     --max-iterations 1 \
     --no-push \
     --no-sleep \
-    "$TEST_DIR2" 2>&1) || true
+    '"$TEST_DIR2"' 2>&1) || true
 
 echo "$OUTPUT2"
 echo ""
@@ -238,12 +259,12 @@ echo "Branches (all epics):"
 git branch | grep ralph
 echo ""
 
-OUTPUT3=$("$RALPH_SCRIPT" \
-    --agent-cmd "$MOCK_AGENT" \
+OUTPUT3=$(eval "$RALPH_SCRIPT" \
+    --agent-cmd '"$MOCK_AGENT"' \
     --max-iterations 1 \
     --no-push \
     --no-sleep \
-    "$TEST_DIR3" 2>&1) || true
+    '"$TEST_DIR3"' 2>&1) || true
 
 echo "$OUTPUT3"
 echo ""
@@ -282,12 +303,12 @@ rm -f .mock-agent-state
 
 # Run with exactly 2 iterations to test iteration limit behavior
 # The script should run 2 iterations and exit gracefully
-OUTPUT4=$("$RALPH_SCRIPT" \
-    --agent-cmd "$MOCK_AGENT" \
+OUTPUT4=$(eval "$RALPH_SCRIPT" \
+    --agent-cmd '"$MOCK_AGENT"' \
     --max-iterations 2 \
     --no-push \
     --no-sleep \
-    "$TEST_DIR4" 2>&1)
+    '"$TEST_DIR4"' 2>&1)
 EXIT_CODE4=$?
 
 echo "$OUTPUT4"

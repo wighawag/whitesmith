@@ -1,0 +1,261 @@
+#!/usr/bin/env tsx
+/**
+ * mock-agent.ts - Mock coding agent for testing ralph-epic
+ *
+ * This simulates an AI coding agent that:
+ * - In DISCOVERY mode: Only reports epic info (no work, no commits)
+ * - In WORK mode: Creates files, commits changes
+ * - Signals epic/project completion appropriately
+ *
+ * Usage: tsx mock-agent.ts "<prompt>"
+ *
+ * The mock maintains state in .mock-agent-state to track progress across iterations.
+ */
+
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { execSync } from 'node:child_process';
+
+const prompt = process.argv[2] || '';
+const workDir = process.cwd();
+const mockStateFile = path.join(workDir, '.mock-agent-state');
+
+// Epic definitions (simulates what markplane would provide)
+interface EpicDef {
+	name: string;
+	dependsOn: string;
+	tasksTotal: number;
+}
+
+const EPICS: Record<string, EpicDef> = {
+	'EPIC-001': { name: 'User Authentication', dependsOn: '', tasksTotal: 2 },
+	'EPIC-002': { name: 'Dashboard UI', dependsOn: 'EPIC-001', tasksTotal: 2 },
+	'EPIC-003': { name: 'API Integration', dependsOn: 'EPIC-002', tasksTotal: 1 },
+};
+
+const EPIC_ORDER = ['EPIC-001', 'EPIC-002', 'EPIC-003'];
+
+// Track completed tasks per epic
+const completedTasks: Record<string, number> = {};
+
+// Load state from file
+function loadState(): void {
+	if (fs.existsSync(mockStateFile)) {
+		const content = fs.readFileSync(mockStateFile, 'utf-8');
+		const lines = content.split('\n');
+		for (const line of lines) {
+			const match = line.match(/^COMPLETED_([A-Z]+-\d+)=(\d+)/);
+			if (match) {
+				completedTasks[match[1]] = parseInt(match[2], 10);
+			}
+		}
+	}
+}
+
+// Save state to file
+function saveState(): void {
+	const lines = Object.entries(completedTasks).map(([epicId, count]) => `COMPLETED_${epicId}=${count}`);
+	fs.writeFileSync(mockStateFile, lines.join('\n'));
+}
+
+// Check if an epic is complete
+function isEpicComplete(epicId: string): boolean {
+	const tasksDone = completedTasks[epicId] || 0;
+	const epic = EPICS[epicId];
+	return epic ? tasksDone >= epic.tasksTotal : false;
+}
+
+// Parse skip list from prompt
+function parseSkipList(): string[] {
+	const skipEpics: string[] = [];
+	if (prompt.includes('already have branches')) {
+		const matches = prompt.match(/^\s*-\s*(EPIC-\d+)/gm);
+		if (matches) {
+			for (const match of matches) {
+				const epicMatch = match.match(/EPIC-\d+/);
+				if (epicMatch) {
+					skipEpics.push(epicMatch[0]);
+				}
+			}
+		}
+	}
+	return skipEpics;
+}
+
+// Discovery mode handler
+function handleDiscoveryMode(): void {
+	console.log('=== Mock Agent: DISCOVERY MODE ===');
+	console.log('');
+
+	const skipEpics = parseSkipList();
+	if (skipEpics.length > 0) {
+		console.log(`Epics to skip (have branches): ${skipEpics.join(' ')}`);
+	}
+
+	// Find next epic
+	let nextEpic: string | null = null;
+
+	for (const epicId of EPIC_ORDER) {
+		// Check if this epic should be skipped
+		if (skipEpics.includes(epicId)) {
+			console.log(`Skipping ${epicId} (has existing branch)`);
+			continue;
+		}
+
+		const epic = EPICS[epicId];
+		const tasksDone = completedTasks[epicId] || 0;
+
+		// Check if epic is already complete from our internal state
+		if (tasksDone >= epic.tasksTotal) {
+			continue;
+		}
+
+		// Check if dependency is satisfied
+		if (epic.dependsOn) {
+			const depDone = completedTasks[epic.dependsOn] || 0;
+			const depEpic = EPICS[epic.dependsOn];
+			// Dependency satisfied if: complete OR has existing branch
+			if (depDone < depEpic.tasksTotal && !skipEpics.includes(epic.dependsOn)) {
+				continue;
+			}
+		}
+
+		// Found an incomplete epic with satisfied dependencies
+		nextEpic = epicId;
+		break;
+	}
+
+	if (!nextEpic) {
+		console.log('All epics are complete!');
+		console.log('');
+		console.log('RALPH_COMPLETE');
+		process.exit(0);
+	}
+
+	const epic = EPICS[nextEpic];
+	console.log(`EPIC_ID: ${nextEpic}`);
+	console.log(`EPIC_NAME: ${epic.name}`);
+	console.log(`DEPENDS_ON: ${epic.dependsOn}`);
+	console.log('');
+	console.log('--- Mock agent discovery complete ---');
+}
+
+// Work mode handler
+function handleWorkMode(): void {
+	console.log('=== Mock Agent: WORK MODE ===');
+	console.log('');
+
+	// Extract current epic from prompt
+	const epicMatch = prompt.match(/EPIC-\d+/);
+	if (!epicMatch) {
+		console.error('ERROR: Could not determine current epic from prompt');
+		process.exit(1);
+	}
+
+	const currentEpic = epicMatch[0];
+	const epic = EPICS[currentEpic];
+
+	if (!epic) {
+		console.error(`ERROR: Unknown epic ${currentEpic}`);
+		process.exit(1);
+	}
+
+	// Get and increment task counter
+	const taskCounter = (completedTasks[currentEpic] || 0) + 1;
+
+	console.log(`Working on: ${currentEpic} (${epic.name})`);
+	console.log(`Task ${taskCounter} of ${epic.tasksTotal}`);
+	console.log('');
+
+	// Create task file
+	const epicDir = path.join(workDir, 'src', currentEpic.toLowerCase());
+	fs.mkdirSync(epicDir, { recursive: true });
+
+	const taskFile = path.join(epicDir, `task-${taskCounter}.ts`);
+	const content = `// ${epic.name} - Task ${taskCounter}
+// Epic: ${currentEpic}
+// Generated by mock-agent
+
+export function task${taskCounter}() {
+    console.log('Task ${taskCounter} for ${epic.name} implemented!');
+    return { success: true, epic: '${currentEpic}', task: ${taskCounter} };
+}
+`;
+
+	fs.writeFileSync(taskFile, content);
+	console.log(`📝 Created: ${taskFile}`);
+	console.log('');
+
+	// Commit changes
+	console.log('💾 Committing changes...');
+	try {
+		execSync('git add .', { cwd: workDir, stdio: 'inherit' });
+		execSync(`git commit -m "feat(${currentEpic}): implement task ${taskCounter} for ${epic.name}"`, {
+			cwd: workDir,
+			stdio: 'inherit',
+		});
+	} catch {
+		// Commit might fail if nothing to commit, which is fine
+	}
+	console.log('');
+
+	// Update state
+	completedTasks[currentEpic] = taskCounter;
+	saveState();
+
+	// Check if epic is complete
+	if (taskCounter >= epic.tasksTotal) {
+		console.log(`✅ All tasks in ${epic.name} completed!`);
+		console.log('');
+		console.log('EPIC_COMPLETE');
+		console.log('');
+		console.log('PR_DESCRIPTION_START');
+		console.log(`## ${epic.name}`);
+		console.log('');
+		console.log('### Summary');
+		console.log(`Implemented all ${epic.tasksTotal} tasks for the ${epic.name} epic.`);
+		console.log('');
+		console.log('### Changes');
+		for (let i = 1; i <= epic.tasksTotal; i++) {
+			console.log(`- Task ${i}: Added implementation in \`src/${currentEpic.toLowerCase()}/task-${i}.ts\``);
+		}
+		console.log('');
+		console.log('### Testing');
+		console.log('All acceptance criteria have been verified.');
+		console.log('PR_DESCRIPTION_END');
+
+		// Check if ALL epics are done
+		let allDone = true;
+		for (const epicId of EPIC_ORDER) {
+			const e = EPICS[epicId];
+			const doneCount = completedTasks[epicId] || 0;
+			if (doneCount < e.tasksTotal) {
+				allDone = false;
+				break;
+			}
+		}
+
+		if (allDone) {
+			console.log('');
+			console.log('🎉 All epics completed!');
+			console.log('RALPH_COMPLETE');
+		}
+	}
+
+	console.log('');
+	console.log('--- Mock agent work iteration complete ---');
+}
+
+// Detect mode from prompt
+function isDiscoveryMode(): boolean {
+	return prompt.includes('ONLY task right now is to identify') || prompt.includes('discovery phase');
+}
+
+// Main
+loadState();
+
+if (isDiscoveryMode()) {
+	handleDiscoveryMode();
+} else {
+	handleWorkMode();
+}
