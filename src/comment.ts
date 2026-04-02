@@ -75,6 +75,8 @@ export async function handlePRComment(
 	// Gather whitesmith context based on branch naming
 	const context = await gatherContextForPR(pr.branch, config.workDir, issues, config.number);
 
+	const responseFile = '.whitesmith-response.md';
+
 	const prompt = buildPRCommentPrompt({
 		title: pr.title,
 		url: pr.url,
@@ -83,6 +85,7 @@ export async function handlePRComment(
 		branch: pr.branch,
 		commentBody: config.commentBody,
 		context,
+		responseFile,
 	});
 
 	const {exitCode} = await agent.run({
@@ -95,6 +98,18 @@ export async function handlePRComment(
 		throw new Error(`Agent failed with exit code ${exitCode}`);
 	}
 
+	// Read the response file before committing (so it doesn't get committed)
+	const responsePath = path.join(config.workDir, responseFile);
+	let response: string | null = null;
+	if (fs.existsSync(responsePath)) {
+		response = fs.readFileSync(responsePath, 'utf-8');
+		try {
+			fs.unlinkSync(responsePath);
+		} catch {
+			// ignore
+		}
+	}
+
 	// Commit and push any changes
 	const committed = await git.commitAll(`fix(#${config.number}): address review comment`);
 	if (committed) {
@@ -102,6 +117,18 @@ export async function handlePRComment(
 		console.log(`Changes pushed to ${pr.branch}`);
 	} else {
 		console.log('No changes to commit.');
+	}
+
+	// Post the response as a PR comment
+	if (response) {
+		if (config.post) {
+			await issues.comment(config.number, response);
+			console.log(`Response posted as comment on PR #${config.number}`);
+		} else {
+			process.stdout.write(response);
+		}
+	} else {
+		console.log('Agent did not produce a response file.');
 	}
 }
 
@@ -383,6 +410,7 @@ interface PRCommentPromptArgs {
 	branch: string;
 	commentBody: string;
 	context: WhitesmithContext;
+	responseFile: string;
 }
 
 function buildPRCommentPrompt(args: PRCommentPromptArgs): string {
@@ -405,15 +433,20 @@ ${args.commentBody}
 
 ## Instructions
 
-You are working on a pull request. The comment above is a request from a reviewer or contributor.
+You are responding to a comment on a pull request. The comment may be a question, feedback,
+a request for changes, or a general discussion point.
 
 1. You are already on the PR branch: \`${args.branch}\`
-2. Read and understand the comment request.
+2. Read and understand the comment.
 3. Review the whitesmith context above to understand the pipeline state.
-4. Make the requested changes.
-5. Commit your changes with a descriptive message.
+4. You have full access to the repository code — read files, explore the codebase as needed.
+5. If the comment requests code changes, make them. Do NOT commit — the caller will handle committing and pushing.
+6. **Always** write a response in Markdown to the file \`${args.responseFile}\`. This will be posted as a reply comment on the PR.
+   - If you made changes, summarize what you changed and why.
+   - If the comment is a question or discussion, provide a thoughtful answer.
+   - Be thorough but concise.
 
-Do NOT push. Do NOT create a new PR. The caller will handle pushing.
+Do NOT push. Do NOT create a new PR. Do NOT commit. The caller handles all of that.
 `;
 }
 
