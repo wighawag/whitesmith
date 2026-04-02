@@ -144,6 +144,9 @@ export class PiHarness implements AgentHarness {
 				timeout: 30 * 60 * 1000, // 30 minute timeout
 			});
 
+			// Close stdin immediately so pi doesn't hang waiting for piped input
+			child.stdin?.end();
+
 			let output = '';
 			let lineBuffer = '';
 			const logStream = logFile
