@@ -7,7 +7,7 @@ depends_on: []
 
 ## Description
 
-Add a `--dry-run` flag to the `whitesmith run` command. When set, the orchestrator should go through its normal startup (validate agent, ensure labels, fetch, checkout main) and call `decideAction()`, then print a human-readable summary of what it *would* do — and exit immediately with code 0. No agent runs, no git branch operations, no GitHub API mutations (labels, PRs, comments, closes) should occur.
+Add a `--dry-run` flag to the `whitesmith run` command. When set, the orchestrator should **skip** `agent.validate()` and `ensureLabels()` (since the former is unnecessary when no agent will run and would fail for users without it installed, and the latter is a write operation that creates missing labels via the GitHub API), then fetch/checkout main, call `decideAction()`, print a human-readable summary of what it *would* do, and exit immediately with code 0. No agent runs, no git branch operations, no GitHub API mutations (labels, PRs, comments, closes) should occur.
 
 ## Acceptance Criteria
 
@@ -31,7 +31,23 @@ Add `dryRun: boolean` to the `DevPulseConfig` interface.
 - Set `dryRun: opts.dryRun ?? false` in the config object passed to `Orchestrator`.
 
 ### 3. `src/orchestrator.ts`
-In the `run()` method, after calling `this.decideAction()` and the `console.log(`Action: ${action.type}`)` line, add:
+
+**Skip side-effectful startup in dry-run mode.** Before the agent validation and label creation (around lines 45-50), add a guard:
+
+```ts
+// Skip agent validation and label creation in dry-run mode
+if (!this.config.dryRun) {
+    await this.agent.validate();
+    console.log('Agent validated successfully.');
+    console.log('');
+
+    await this.issues.ensureLabels(Object.values(LABELS));
+}
+```
+
+This ensures `--dry-run` doesn't fail if the agent isn't installed, and doesn't create labels as a side effect.
+
+**Print action summary and exit early.** In the `run()` method, after calling `this.decideAction()` and the `console.log(`Action: ${action.type}`)` line, add:
 
 ```ts
 if (this.config.dryRun) {
