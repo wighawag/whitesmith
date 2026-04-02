@@ -22,7 +22,19 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Get npm global prefix
+        id: npm-prefix
+        run: echo "dir=$(npm prefix -g)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache global npm packages
+        id: npm-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.npm-prefix.outputs.dir }}
+          key: npm-global-${{ runner.os }}-whitesmith-v1
+
       - name: Install whitesmith
+        if: steps.npm-cache.outputs.cache-hit != 'true'
         run: npm install -g whitesmith
 
       - name: Reconcile

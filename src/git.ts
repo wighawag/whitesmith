@@ -28,6 +28,21 @@ export class GitManager {
 	}
 
 	/**
+	 * Remove all .whitesmith-* temp files from the working directory.
+	 */
+	cleanupTempFiles(): void {
+		for (const entry of fs.readdirSync(this.workDir)) {
+			if (entry.startsWith('.whitesmith-')) {
+				try {
+					fs.unlinkSync(path.join(this.workDir, entry));
+				} catch {
+					// ignore
+				}
+			}
+		}
+	}
+
+	/**
 	 * Fetch latest from origin
 	 */
 	async fetch(): Promise<void> {
@@ -62,15 +77,7 @@ export class GitManager {
 		const allExclude = ['.whitesmith-*', ...(exclude || [])];
 
 		// Remove any whitesmith temp files from the working tree
-		for (const entry of fs.readdirSync(this.workDir)) {
-			if (entry.startsWith('.whitesmith-')) {
-				try {
-					fs.unlinkSync(path.join(this.workDir, entry));
-				} catch {
-					// ignore
-				}
-			}
-		}
+		this.cleanupTempFiles();
 
 		// Check if there are changes
 		const status = await this.git('status --porcelain');

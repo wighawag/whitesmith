@@ -80,11 +80,23 @@ jobs:
           git config user.name "whitesmith[bot]"
           git config user.email "whitesmith[bot]@users.noreply.github.com"
 
+      - name: Get npm global prefix
+        id: npm-prefix
+        run: echo "dir=$(npm prefix -g)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache global npm packages
+        id: npm-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.npm-prefix.outputs.dir }}
+          key: npm-global-${{ runner.os }}-${{ github.repository == 'wighawag/whitesmith' && 'source' || 'registry' }}-pi-v1
+
       - name: Setup pnpm
         if: github.repository == 'wighawag/whitesmith'
         uses: pnpm/action-setup@v4
 
       - name: Install or build whitesmith
+        if: steps.npm-cache.outputs.cache-hit != 'true'
         run: |
           if [ "${{ github.repository }}" = "wighawag/whitesmith" ]; then
             echo "Running in whitesmith repo — building from source"
@@ -95,7 +107,15 @@ jobs:
             npm install -g whitesmith
           fi
 
+      - name: Rebuild whitesmith from source (cache hit)
+        if: steps.npm-cache.outputs.cache-hit == 'true' && github.repository == 'wighawag/whitesmith'
+        run: |
+          pnpm install
+          pnpm run build
+          pnpm link --global
+
       - name: Install pi
+        if: steps.npm-cache.outputs.cache-hit != 'true'
         run: npm install -g @mariozechner/pi-coding-agent
 
       - name: Configure pi auth

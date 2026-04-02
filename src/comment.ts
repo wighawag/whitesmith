@@ -65,6 +65,9 @@ export async function handlePRComment(
 	console.log(`PR #${config.number}: ${pr.title}`);
 	console.log(`Branch: ${pr.branch}`);
 
+	// Clean up temp files before checkout to avoid conflicts
+	git.cleanupTempFiles();
+
 	// Checkout PR branch
 	await git.fetch();
 	await git.checkout(pr.branch);
