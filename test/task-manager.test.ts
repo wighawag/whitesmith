@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { TaskManager } from '../task-manager.js';
+import { TaskManager } from '../src/task-manager.js';
 
 describe('TaskManager', () => {
 	let tmpDir: string;
