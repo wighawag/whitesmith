@@ -33,6 +33,8 @@ function createMockIssueProvider(overrides: Partial<IssueProvider> = {}): IssueP
 		remoteBranchExists: vi.fn().mockResolvedValue(false),
 		getPRForBranch: vi.fn().mockResolvedValue(null),
 		ensureLabels: vi.fn().mockResolvedValue(undefined),
+		listPRsByBranchPrefix: vi.fn().mockResolvedValue([]),
+		getPR: vi.fn().mockResolvedValue(null),
 		...overrides,
 	};
 }
@@ -85,6 +87,10 @@ Test task.
 }
 
 // We need to mock GitManager since tests don't have a real git repo
+// Shared mock functions so tests can override behavior
+const mockRemoteFileExists = vi.fn().mockResolvedValue(true);
+const mockRemotePathHasFiles = vi.fn().mockResolvedValue(true);
+
 vi.mock('../src/git.js', () => {
 	class MockGitManager {
 		fetch = vi.fn().mockResolvedValue(undefined);
@@ -99,6 +105,8 @@ vi.mock('../src/git.js', () => {
 		deleteLocalBranch = vi.fn().mockResolvedValue(undefined);
 		getDefaultBranch = vi.fn().mockResolvedValue('main');
 		verifyBranch = vi.fn().mockResolvedValue(undefined);
+		remoteFileExists = mockRemoteFileExists;
+		remotePathHasFiles = mockRemotePathHasFiles;
 	}
 	return {GitManager: MockGitManager};
 });
@@ -108,6 +116,9 @@ describe('Orchestrator', () => {
 
 	beforeEach(() => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whitesmith-orch-'));
+		// Reset shared git mocks to defaults
+		mockRemoteFileExists.mockReset().mockResolvedValue(true);
+		mockRemotePathHasFiles.mockReset().mockResolvedValue(true);
 	});
 
 	afterEach(() => {
@@ -130,7 +141,7 @@ describe('Orchestrator', () => {
 	});
 
 	describe('reconcile', () => {
-		it('closes an issue when all tasks are done', async () => {
+		it('closes an issue when all tasks are done on issue branch', async () => {
 			const issue = makeIssue({number: 42, title: 'Feature X'});
 
 			const issues = createMockIssueProvider({
@@ -140,12 +151,16 @@ describe('Orchestrator', () => {
 						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [issue];
 						return [];
 					}),
+				// issue/42 branch exists and has no task files (all completed)
+				remoteBranchExists: vi.fn().mockResolvedValue(true),
 			});
 
 			const agent = createMockAgent();
 			const config = createConfig(tmpDir);
 
-			// No task files = all tasks completed
+			// Override remotePathHasFiles to return false (no task files = all done)
+			mockRemotePathHasFiles.mockResolvedValue(false);
+
 			const orch = new Orchestrator(config, issues, agent);
 			await orch.run();
 
@@ -153,6 +168,38 @@ describe('Orchestrator', () => {
 			expect(issues.removeLabel).toHaveBeenCalledWith(42, LABELS.TASKS_ACCEPTED);
 			expect(issues.closeIssue).toHaveBeenCalledWith(42);
 			expect(issues.comment).toHaveBeenCalledWith(42, expect.stringContaining('All tasks'));
+		});
+
+		it('creates safety-net PR during reconcile if none exists', async () => {
+			const issue = makeIssue({number: 42, title: 'Feature X'});
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [issue];
+						return [];
+					}),
+				remoteBranchExists: vi.fn().mockResolvedValue(true),
+				getPRForBranch: vi.fn().mockResolvedValue(null),
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir, {noPush: false});
+
+			mockRemotePathHasFiles.mockResolvedValue(false);
+
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			expect(issues.createPR).toHaveBeenCalledWith(
+				expect.objectContaining({
+					head: 'issue/42',
+					base: 'main',
+					title: expect.stringContaining('#42'),
+				}),
+			);
+			expect(issues.closeIssue).toHaveBeenCalledWith(42);
 		});
 	});
 
@@ -273,13 +320,13 @@ describe('Orchestrator', () => {
 			);
 		});
 
-		it('skips tasks with unsatisfied dependencies', async () => {
+		it('skips tasks with unsatisfied dependencies (dep not yet completed on issue branch)', async () => {
 			const issue = makeIssue({number: 20});
 
 			writeTaskFile(tmpDir, 20, 1, 'base');
 			writeTaskFile(tmpDir, 20, 2, 'dependent', ['20-001']);
 
-			// Make branch exist for task 20-001 with an open PR so it's truly skipped
+			// Issue branch exists but task 20-001 file still present (not completed yet)
 			const issues = createMockIssueProvider({
 				listIssues: vi
 					.fn()
@@ -288,13 +335,12 @@ describe('Orchestrator', () => {
 						return [];
 					}),
 				remoteBranchExists: vi.fn().mockImplementation(async (branch: string) => {
-					return branch === 'task/20-001';
-				}),
-				getPRForBranch: vi.fn().mockImplementation(async (branch: string) => {
-					if (branch === 'task/20-001') return {state: 'open', url: 'https://github.com/test/repo/pull/1'};
-					return null;
+					return branch === 'issue/20';
 				}),
 			});
+
+			// remoteFileExists: both task files exist on the branch (neither completed)
+			mockRemoteFileExists.mockResolvedValue(true);
 
 			const agent = createMockAgent();
 			const config = createConfig(tmpDir);
@@ -302,16 +348,22 @@ describe('Orchestrator', () => {
 			const orch = new Orchestrator(config, issues, agent);
 			await orch.run();
 
-			// Agent should NOT be called because:
-			// - 20-001 has a remote branch (someone working on it)
-			// - 20-002 depends on 20-001 which still exists
-			expect(agent.run).not.toHaveBeenCalled();
+			// Should implement 20-001 (first task, no deps)
+			// 20-002 depends on 20-001 which is not yet completed
+			expect(agent.run).toHaveBeenCalledTimes(1);
+			expect(agent.run).toHaveBeenCalledWith(
+				expect.objectContaining({
+					prompt: expect.stringContaining('20-001'),
+				}),
+			);
 		});
 
-		it('skips tasks that already have a remote branch with PR', async () => {
+		it('skips completed tasks on issue branch and picks next', async () => {
 			const issue = makeIssue({number: 30});
 			writeTaskFile(tmpDir, 30, 1, 'task-a');
+			writeTaskFile(tmpDir, 30, 2, 'task-b', ['30-001']);
 
+			// Issue branch exists, task-a (001) file deleted (completed), task-b (002) still present
 			const issues = createMockIssueProvider({
 				listIssues: vi
 					.fn()
@@ -320,7 +372,11 @@ describe('Orchestrator', () => {
 						return [];
 					}),
 				remoteBranchExists: vi.fn().mockResolvedValue(true),
-				getPRForBranch: vi.fn().mockResolvedValue({state: 'open', url: 'https://github.com/test/repo/pull/1'}),
+			});
+
+			// task-a file doesn't exist on issue branch (completed), task-b exists
+			mockRemoteFileExists.mockImplementation(async (_ref: string, filePath: string) => {
+				return filePath.includes('002');
 			});
 
 			const agent = createMockAgent();
@@ -329,10 +385,16 @@ describe('Orchestrator', () => {
 			const orch = new Orchestrator(config, issues, agent);
 			await orch.run();
 
-			expect(agent.run).not.toHaveBeenCalled();
+			// Should skip 30-001 (completed) and implement 30-002 (dep satisfied)
+			expect(agent.run).toHaveBeenCalledTimes(1);
+			expect(agent.run).toHaveBeenCalledWith(
+				expect.objectContaining({
+					prompt: expect.stringContaining('30-002'),
+				}),
+			);
 		});
 
-		it('picks up task with remote branch but no PR (stalled push)', async () => {
+		it('picks up task when issue branch exists but task not yet done', async () => {
 			const issue = makeIssue({number: 40});
 			writeTaskFile(tmpDir, 40, 1, 'stalled');
 
@@ -344,9 +406,10 @@ describe('Orchestrator', () => {
 						return [];
 					}),
 				remoteBranchExists: vi.fn().mockResolvedValue(true),
-				// No PR exists — previous attempt pushed but failed to create PR
-				getPRForBranch: vi.fn().mockResolvedValue(null),
 			});
+
+			// Task file still exists on the issue branch (not completed)
+			mockRemoteFileExists.mockResolvedValue(true);
 
 			const agent = createMockAgent();
 			const config = createConfig(tmpDir);
@@ -354,7 +417,7 @@ describe('Orchestrator', () => {
 			const orch = new Orchestrator(config, issues, agent);
 			await orch.run();
 
-			// Should pick up the task (not skip it)
+			// Should pick up the task
 			expect(agent.run).toHaveBeenCalledTimes(1);
 			expect(agent.run).toHaveBeenCalledWith(
 				expect.objectContaining({
@@ -379,7 +442,14 @@ describe('Orchestrator', () => {
 						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [completedIssue, activeIssue];
 						return [];
 					}),
+				// issue/1 branch exists with all tasks done, issue/2 branch has tasks remaining
+				remoteBranchExists: vi.fn().mockImplementation(async (branch: string) => {
+					return branch === 'issue/1';
+				}),
 			});
+
+			// issue/1 has no task files (all done)
+			mockRemotePathHasFiles.mockResolvedValue(false);
 
 			const agent = createMockAgent();
 			const config = createConfig(tmpDir);
@@ -492,8 +562,8 @@ describe('Orchestrator', () => {
 			expect(issues.addLabel).toHaveBeenCalledWith(9, LABELS.TASKS_PROPOSED);
 		});
 
-		it('creates PR when noPush is false during implement', async () => {
-			const issue = makeIssue({number: 15});
+		it('creates PR on issue branch when last task completes (noPush false)', async () => {
+			const issue = makeIssue({number: 15, title: 'Feature fifteen'});
 			writeTaskFile(tmpDir, 15, 1, 'do-thing');
 
 			const issues = createMockIssueProvider({
@@ -505,7 +575,16 @@ describe('Orchestrator', () => {
 					}),
 			});
 
-			const agent = createMockAgent();
+			// Agent deletes the task file (simulating completion)
+			const agent = createMockAgent({
+				run: vi.fn().mockImplementation(async () => {
+					// Delete the task file to simulate agent completing the task
+					const taskDir = path.join(tmpDir, 'tasks', '15');
+					fs.rmSync(taskDir, {recursive: true, force: true});
+					return {output: 'done', exitCode: 0};
+				}),
+			});
+
 			const config = createConfig(tmpDir, {noPush: false});
 
 			const orch = new Orchestrator(config, issues, agent);
@@ -513,10 +592,43 @@ describe('Orchestrator', () => {
 
 			expect(issues.createPR).toHaveBeenCalledWith(
 				expect.objectContaining({
-					head: 'task/15-001',
+					head: 'issue/15',
 					base: 'main',
+					title: expect.stringContaining('#15'),
 				}),
 			);
+		});
+
+		it('does not create PR when tasks remain after implementation', async () => {
+			const issue = makeIssue({number: 16, title: 'Multi-task'});
+			writeTaskFile(tmpDir, 16, 1, 'first');
+			writeTaskFile(tmpDir, 16, 2, 'second');
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [issue];
+						return [];
+					}),
+			});
+
+			// Agent deletes only the first task file
+			const agent = createMockAgent({
+				run: vi.fn().mockImplementation(async () => {
+					const taskFile = path.join(tmpDir, 'tasks', '16', '001-first.md');
+					fs.unlinkSync(taskFile);
+					return {output: 'done', exitCode: 0};
+				}),
+			});
+
+			const config = createConfig(tmpDir, {noPush: false});
+
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Should NOT create PR (task 2 still remaining)
+			expect(issues.createPR).not.toHaveBeenCalled();
 		});
 	});
 });

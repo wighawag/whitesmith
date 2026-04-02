@@ -12,7 +12,11 @@ import {buildInvestigatePrompt, buildImplementPrompt} from './prompts.js';
  * The loop:
  * 1. Reconcile — check if any issues with tasks-accepted have all tasks done
  * 2. Investigate — pick an unlabeled issue, generate tasks
- * 3. Implement — pick an available task, implement it
+ * 3. Implement — pick an available task, implement it on the issue/<number> branch
+ *
+ * Implementation uses a single branch per issue (`issue/<number>`). Each task
+ * adds one commit to the branch. When the last task completes, a PR is created
+ * immediately. `reconcile()` is a safety net for crash recovery.
  */
 export class Orchestrator {
 	private config: DevPulseConfig;
@@ -108,13 +112,28 @@ export class Orchestrator {
 	}
 
 	/**
+	 * Check whether all tasks for an issue have been completed on the issue branch.
+	 * Works without checking out the branch by inspecting the remote via git ls-tree.
+	 */
+	private async allTasksCompletedOnBranch(issueNumber: number): Promise<boolean> {
+		const branch = `issue/${issueNumber}`;
+		const branchExists = await this.issues.remoteBranchExists(branch);
+		if (!branchExists) return false;
+
+		// Check if any task files remain on the issue branch
+		const hasFiles = await this.git.remotePathHasFiles(`origin/${branch}`, `tasks/${issueNumber}/`);
+		return !hasFiles;
+	}
+
+	/**
 	 * Decide the next action to take
 	 */
 	private async decideAction(): Promise<Action> {
 		// Priority 1: Reconcile — issues with tasks-accepted where all tasks are done
 		const acceptedIssues = await this.issues.listIssues({labels: [LABELS.TASKS_ACCEPTED]});
 		for (const issue of acceptedIssues) {
-			if (!this.tasks.hasRemainingTasks(issue.number)) {
+			const allDone = await this.allTasksCompletedOnBranch(issue.number);
+			if (allDone) {
 				return {type: 'reconcile', issue};
 			}
 		}
@@ -138,32 +157,47 @@ export class Orchestrator {
 	}
 
 	/**
-	 * Find an available task to implement
+	 * Find an available task to implement.
+	 *
+	 * Uses task files on `main` as the canonical list of pending tasks.
+	 * If an issue branch exists, checks which task files have been deleted
+	 * on it (= completed) and skips those.
 	 */
 	private async findAvailableTask(
 		acceptedIssues: Issue[],
 	): Promise<{type: 'implement'; task: Task; issue: Issue} | null> {
 		for (const issue of acceptedIssues) {
 			const issueTasks = this.tasks.listTasks(issue.number);
+			if (issueTasks.length === 0) continue;
+
+			// Determine which tasks are already completed on the issue branch
+			const branch = `issue/${issue.number}`;
+			const branchExists = await this.issues.remoteBranchExists(branch);
+			const completedTaskFiles = new Set<string>();
+
+			if (branchExists) {
+				// Check each task file's existence on the remote issue branch
+				for (const task of issueTasks) {
+					const existsOnBranch = await this.git.remoteFileExists(`origin/${branch}`, task.filePath);
+					if (!existsOnBranch) {
+						// Task file deleted on issue branch = completed
+						completedTaskFiles.add(task.filePath);
+					}
+				}
+			}
 
 			for (const task of issueTasks) {
-				// Check dependencies are satisfied
-				if (!this.tasks.areDependenciesSatisfied(task)) {
-					continue;
-				}
+				// Skip completed tasks
+				if (completedTaskFiles.has(task.filePath)) continue;
 
-				const branch = `task/${task.id}`;
-				const branchExists = await this.issues.remoteBranchExists(branch);
-				if (branchExists) {
-					// Branch exists — check if it already has a PR
-					const pr = await this.issues.getPRForBranch(branch);
-					if (pr) {
-						// PR exists (open or merged) — truly skip
-						continue;
-					}
-					// Branch exists but no PR — previous attempt pushed but
-					// failed to create PR. Pick it up to finish the job.
-				}
+				// Check dependencies are satisfied
+				// A dependency is satisfied if its task file is gone from main OR completed on the issue branch
+				const depsOk = task.dependsOn.every((depId) => {
+					const depTask = issueTasks.find((t) => t.id === depId);
+					if (!depTask) return true; // dep not in pending list on main = already merged
+					return completedTaskFiles.has(depTask.filePath);
+				});
+				if (!depsOk) continue;
 
 				return {type: 'implement', task, issue};
 			}
@@ -173,11 +207,34 @@ export class Orchestrator {
 	}
 
 	/**
-	 * Phase 1: Reconcile — mark issue as completed, close it
+	 * Phase 1: Reconcile — mark issue as completed, close it.
+	 * Also serves as safety net: creates PR if all tasks are done but no PR exists
+	 * (e.g. agent crashed after last task push but before PR creation).
 	 */
 	private async reconcile(issue: Issue): Promise<void> {
 		console.log(`Reconciling issue #${issue.number}: ${issue.title}`);
 		console.log('All tasks completed. Marking issue as done.');
+
+		// Safety net: ensure a PR exists for the issue branch
+		const branch = `issue/${issue.number}`;
+		const branchExists = await this.issues.remoteBranchExists(branch);
+		if (branchExists && !this.config.noPush) {
+			const existingPR = await this.issues.getPRForBranch(branch);
+			if (!existingPR) {
+				console.log(`Safety net: creating PR for ${branch} (missed during implement)`);
+				const issueTasks = this.tasks.listTasks(issue.number);
+				const taskSummary = issueTasks.length > 0
+					? issueTasks.map((t) => `- ✅ **${t.id}**: ${t.title}`).join('\n')
+					: '- All tasks completed';
+				const prUrl = await this.issues.createPR({
+					head: branch,
+					base: 'main',
+					title: `feat(#${issue.number}): ${issue.title}`,
+					body: `## Implementation for #${issue.number}\n\n${taskSummary}\n\n---\n*Implemented by whitesmith*\n\nCloses #${issue.number}`,
+				});
+				console.log(`Safety net PR created: ${prUrl}`);
+			}
+		}
 
 		await this.issues.addLabel(issue.number, LABELS.COMPLETED);
 		await this.issues.removeLabel(issue.number, LABELS.TASKS_ACCEPTED);
@@ -303,38 +360,33 @@ export class Orchestrator {
 	}
 
 	/**
-	 * Phase 3: Implement — implement a task and create a PR
+	 * Phase 3: Implement — implement a task on the issue/<number> branch.
+	 * Each task adds one commit. When all tasks are done, a PR is created immediately.
 	 */
 	private async implement(task: Task, issue: Issue): Promise<void> {
 		console.log(`Implementing task ${task.id}: ${task.title}`);
 		console.log(`For issue #${issue.number}: ${issue.title}`);
 
-		const branch = `task/${task.id}`;
+		const branch = `issue/${issue.number}`;
 
 		try {
-			// Check if a previous attempt already completed work on this branch.
-			// The agent deletes the task file when done, so if the task file
-			// is absent on the branch, the implementation is complete.
+			// Check if the issue branch already exists (previous tasks may have committed to it)
 			const remoteBranchExists = await this.issues.remoteBranchExists(branch);
 			let agentNeeded = true;
 
 			await this.git.deleteLocalBranch(branch);
 
 			if (remoteBranchExists) {
+				// Continue from existing issue branch (accumulate commits)
 				await this.git.checkout(branch, {create: true, startPoint: `origin/${branch}`});
 
-				// The task file path is relative to workDir. If it's gone, work is done.
-				const taskFileExists = await this.tasks.taskFileExists(task.filePath);
+				// Check if this specific task was already completed on the branch
+				const taskFileExists = this.tasks.taskFileExists(task.filePath);
 				if (!taskFileExists) {
 					console.log(
-						`Branch '${branch}' already exists and task file deleted, skipping agent`,
+						`Task file '${task.filePath}' already deleted on branch '${branch}', skipping agent`,
 					);
 					agentNeeded = false;
-				} else {
-					// Task file still present — agent didn't finish. Start fresh.
-					console.log(`Branch '${branch}' exists but task file still present, starting fresh`);
-					await this.git.deleteLocalBranch(branch);
-					await this.git.checkout(branch, {create: true, startPoint: 'origin/main'});
 				}
 			} else {
 				await this.git.checkout(branch, {create: true, startPoint: 'origin/main'});
@@ -367,23 +419,30 @@ export class Orchestrator {
 				// Force push since the branch may exist from a previous failed attempt
 				await this.git.forcePush(branch);
 
-				// Check if a PR already exists for this branch
-				const existingPR = await this.issues.getPRForBranch(branch);
-				let prUrl: string;
+				// Check if all tasks for this issue are now complete
+				// (task files deleted on the current working tree = issue branch)
+				const remainingTasks = this.tasks.listTasks(issue.number);
+				if (remainingTasks.length === 0) {
+					// All tasks done — create PR immediately
+					const existingPR = await this.issues.getPRForBranch(branch);
+					let prUrl: string;
 
-				if (existingPR && existingPR.state === 'open') {
-					prUrl = existingPR.url;
-					console.log(`PR already exists: ${prUrl}`);
+					if (existingPR && existingPR.state === 'open') {
+						prUrl = existingPR.url;
+						console.log(`PR already exists: ${prUrl}`);
+					} else {
+						prUrl = await this.issues.createPR({
+							head: branch,
+							base: 'main',
+							title: `feat(#${issue.number}): ${issue.title}`,
+							body: `## Implementation for #${issue.number}\n\nAll tasks completed.\n\n---\n*Implemented by whitesmith*\n\nCloses #${issue.number}`,
+						});
+					}
+
+					console.log(`PR created: ${prUrl}`);
 				} else {
-					prUrl = await this.issues.createPR({
-						head: branch,
-						base: 'main',
-						title: `feat(#${issue.number}): ${task.title}`,
-						body: `## Task: ${task.title}\n\nImplements task \`${task.id}\` from issue #${issue.number}.\n\n### From the task spec:\n\n${task.content}\n\n---\n*Implemented by whitesmith*\n\nCloses #${issue.number} (if all tasks are complete)`,
-					});
+					console.log(`Task ${task.id} committed. ${remainingTasks.length} task(s) remaining for issue #${issue.number}.`);
 				}
-
-				console.log(`PR created: ${prUrl}`);
 			}
 		} catch (error) {
 			console.error('Implementation failed:', error instanceof Error ? error.message : error);

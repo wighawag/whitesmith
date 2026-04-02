@@ -159,6 +159,30 @@ export class GitManager {
 	}
 
 	/**
+	 * Check if a file exists on a remote ref (without checking out)
+	 */
+	async remoteFileExists(ref: string, filePath: string): Promise<boolean> {
+		try {
+			await this.git(`show ${ref}:${filePath}`);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	/**
+	 * Check if a path has any files on a remote ref (without checking out)
+	 */
+	async remotePathHasFiles(ref: string, dirPath: string): Promise<boolean> {
+		try {
+			const result = await this.git(`ls-tree ${ref} -- ${dirPath}`);
+			return result.length > 0;
+		} catch {
+			return false;
+		}
+	}
+
+	/**
 	 * Verify we're on the expected branch
 	 */
 	async verifyBranch(expected: string): Promise<void> {
