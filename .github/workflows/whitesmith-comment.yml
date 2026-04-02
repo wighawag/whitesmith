@@ -8,11 +8,9 @@ name: whitesmith-comment
 on:
   issue_comment:
     types: [created]
-  pull_request_review_comment:
-    types: [created]
 
 concurrency:
-  group: whitesmith-comment-${{ github.event.issue.number || github.event.pull_request.number }}
+  group: whitesmith-comment-${{ github.event.issue.number }}
   cancel-in-progress: false
 
 permissions:
@@ -21,21 +19,51 @@ permissions:
   pull-requests: write
 
 jobs:
-  run:
+  check:
     runs-on: ubuntu-latest
-    if: contains(github.event.comment.body, '/whitesmith')
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - name: Check if should run
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          # Always run if comment contains /whitesmith
+          if echo "$COMMENT_BODY" | grep -q '/whitesmith'; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "Triggered by /whitesmith keyword"
+            exit 0
+          fi
+
+          # For PR comments, auto-trigger if the PR is on a whitesmith branch
+          if [ -n "${{ github.event.issue.pull_request.url }}" ]; then
+            BRANCH=$(gh pr view ${{ github.event.issue.number }} \
+              --repo ${{ github.repository }} \
+              --json headRefName -q .headRefName)
+            echo "PR branch: $BRANCH"
+            if echo "$BRANCH" | grep -qE '^(investigate|task)/'; then
+              echo "should_run=true" >> "$GITHUB_OUTPUT"
+              echo "Triggered by comment on whitesmith PR branch"
+              exit 0
+            fi
+          fi
+
+          echo "should_run=false" >> "$GITHUB_OUTPUT"
+          echo "Skipping: not a /whitesmith command and not a whitesmith PR"
+
+  run:
+    needs: check
+    runs-on: ubuntu-latest
+    if: needs.check.outputs.should_run == 'true'
     steps:
       - name: React with eyes to acknowledge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request_review_comment" ]; then
-            gh api repos/${{ github.repository }}/pulls/comments/${{ github.event.comment.id }}/reactions \
-              -f content=eyes
-          else
-            gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
-              -f content=eyes
-          fi
+          gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
+            -f content=eyes
 
       - uses: actions/checkout@v4
         with:
@@ -101,7 +129,7 @@ jobs:
             exit 1
           fi
           whitesmith comment . \
-            --number "${{ github.event.issue.number || github.event.pull_request.number }}" \
+            --number "${{ github.event.issue.number }}" \
             --body-file .whitesmith-comment-body.txt \
             --provider "$PROVIDER" \
             --model "$MODEL" \
@@ -112,27 +140,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request_review_comment" ]; then
-            gh api repos/${{ github.repository }}/pulls/comments/${{ github.event.comment.id }}/reactions \
-              -f content="+1"
-          else
-            gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
-              -f content="+1"
-          fi
+          gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
+            -f content="+1"
 
       - name: React with X and comment on failure
         if: failure()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request_review_comment" ]; then
-            gh api repos/${{ github.repository }}/pulls/comments/${{ github.event.comment.id }}/reactions \
-              -f content="-1"
-          else
-            gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
-              -f content="-1"
-          fi
-          gh issue comment $ISSUE_NUMBER \
+          gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
+            -f content="-1"
+          gh issue comment ${{ github.event.issue.number }} \
             --repo ${{ github.repository }} \
             --body "❌ Agent run failed for [this comment](${{ github.event.comment.html_url }}). Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
