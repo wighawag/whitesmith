@@ -81,12 +81,11 @@ jobs:
         id: context
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          PR_URL: ${{ github.event.issue.pull_request.url }}
         run: |
           ISSUE_NUMBER="${{ github.event.issue.number }}"
-          ISSUE_TITLE="${{ github.event.issue.title }}"
-          ISSUE_URL="${{ github.event.issue.html_url }}"
 
-          PR_URL="${{ github.event.issue.pull_request.url }}"
           if [ -n "$PR_URL" ]; then
             echo "is_pr=true" >> "$GITHUB_OUTPUT"
             PR_BRANCH=$(gh pr view "$ISSUE_NUMBER" --json headRefName -q .headRefName)
@@ -96,43 +95,33 @@ jobs:
           fi
 
           echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
-          echo "issue_title=$ISSUE_TITLE" >> "$GITHUB_OUTPUT"
 
       - name: Build prompt for PR comment
         if: steps.context.outputs.is_pr == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
           ISSUE_NUMBER="${{ steps.context.outputs.issue_number }}"
-          ISSUE_TITLE="${{ steps.context.outputs.issue_title }}"
           ISSUE_URL="${{ github.event.issue.html_url }}"
           PR_BRANCH="${{ steps.context.outputs.pr_branch }}"
 
-          cat > .whitesmith-prompt.md << 'PROMPT_HEADER'
-          # Agent Task from PR Comment
-
-          PROMPT_HEADER
-
           PR_BODY=$(gh pr view "$ISSUE_NUMBER" --json body -q .body)
 
+          cat > .whitesmith-prompt.md << 'PROMPT_EOF'
+          # Agent Task from PR Comment
+          PROMPT_EOF
+
+          # Use printf to safely append user-provided content (no heredoc expansion)
+          printf '\n## Pull Request\n\n' >> .whitesmith-prompt.md
+          printf -- '- **Title:** %s\n' "$ISSUE_TITLE" >> .whitesmith-prompt.md
+          printf -- '- **URL:** %s\n' "$ISSUE_URL" >> .whitesmith-prompt.md
+          printf -- '- **PR Number:** #%s\n' "$ISSUE_NUMBER" >> .whitesmith-prompt.md
+          printf -- '- **Branch:** %s\n' "$PR_BRANCH" >> .whitesmith-prompt.md
+          printf '\n### PR Description\n\n%s\n' "$PR_BODY" >> .whitesmith-prompt.md
+          printf '\n## Triggering Comment\n\n%s\n' "$COMMENT_BODY" >> .whitesmith-prompt.md
           cat >> .whitesmith-prompt.md << PROMPT_EOF
-          ## Pull Request
-
-          - **Title:** ${ISSUE_TITLE}
-          - **URL:** ${ISSUE_URL}
-          - **PR Number:** #${ISSUE_NUMBER}
-          - **Branch:** ${PR_BRANCH}
-
-          ### PR Description
-
-          ${PR_BODY}
-
-          ## Triggering Comment
-
-          $(cat <<'COMMENT_BODY'
-          ${{ github.event.comment.body }}
-          COMMENT_BODY
-          )
 
           ## Instructions
 
@@ -154,35 +143,26 @@ jobs:
         if: steps.context.outputs.is_pr != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
           ISSUE_NUMBER="${{ steps.context.outputs.issue_number }}"
-          ISSUE_TITLE="${{ steps.context.outputs.issue_title }}"
           ISSUE_URL="${{ github.event.issue.html_url }}"
-
-          cat > .whitesmith-prompt.md << 'PROMPT_HEADER'
-          # Agent Task from Issue Comment
-
-          PROMPT_HEADER
 
           ISSUE_BODY=$(gh issue view "$ISSUE_NUMBER" --json body -q .body)
 
-          cat >> .whitesmith-prompt.md << PROMPT_EOF
-          ## Issue
+          cat > .whitesmith-prompt.md << 'PROMPT_EOF'
+          # Agent Task from Issue Comment
+          PROMPT_EOF
 
-          - **Title:** ${ISSUE_TITLE}
-          - **URL:** ${ISSUE_URL}
-          - **Issue Number:** #${ISSUE_NUMBER}
-
-          ### Issue Description
-
-          ${ISSUE_BODY}
-
-          ## Triggering Comment
-
-          $(cat <<'COMMENT_BODY'
-          ${{ github.event.comment.body }}
-          COMMENT_BODY
-          )
+          # Use printf to safely append user-provided content (no heredoc expansion)
+          printf '\n## Issue\n\n' >> .whitesmith-prompt.md
+          printf -- '- **Title:** %s\n' "$ISSUE_TITLE" >> .whitesmith-prompt.md
+          printf -- '- **URL:** %s\n' "$ISSUE_URL" >> .whitesmith-prompt.md
+          printf -- '- **Issue Number:** #%s\n' "$ISSUE_NUMBER" >> .whitesmith-prompt.md
+          printf '\n### Issue Description\n\n%s\n' "$ISSUE_BODY" >> .whitesmith-prompt.md
+          printf '\n## Triggering Comment\n\n%s\n' "$COMMENT_BODY" >> .whitesmith-prompt.md
+          cat >> .whitesmith-prompt.md << 'PROMPT_EOF'
 
           ## Instructions
 
@@ -191,7 +171,7 @@ jobs:
           1. Read and understand the issue description and the triggering comment.
           2. You have full access to the repository code — read files, explore the codebase as needed.
           3. Analyze the request and formulate a helpful response.
-          4. Write your response in Markdown to the file \`.whitesmith-response.md\`.
+          4. Write your response in Markdown to the file `.whitesmith-response.md`.
 
           Your response will be posted as a comment on the issue.
           Be thorough but concise. Include code snippets, file references, or suggestions as appropriate.
