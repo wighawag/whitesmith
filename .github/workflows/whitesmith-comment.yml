@@ -197,7 +197,7 @@ jobs:
             echo "ERROR: WHITESMITH_PROVIDER and WHITESMITH_MODEL repository variables are required."
             exit 1
           fi
-          pi --prompt-file .whitesmith-prompt.md \
+          pi --print --no-session --prompt-file .whitesmith-prompt.md \
             --provider "$PROVIDER" \
             --model "$MODEL"
 
