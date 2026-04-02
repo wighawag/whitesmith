@@ -8,9 +8,11 @@ name: whitesmith-comment
 on:
   issue_comment:
     types: [created]
+  pull_request_review_comment:
+    types: [created]
 
 concurrency:
-  group: whitesmith-comment-${{ github.event.issue.number }}
+  group: whitesmith-comment-${{ github.event.issue.number || github.event.pull_request.number }}
   cancel-in-progress: false
 
 permissions:
@@ -27,8 +29,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
-            -f content=eyes
+          if [ "${{ github.event_name }}" = "pull_request_review_comment" ]; then
+            gh api repos/${{ github.repository }}/pulls/comments/${{ github.event.comment.id }}/reactions \
+              -f content=eyes
+          else
+            gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
+              -f content=eyes
+          fi
 
       - uses: actions/checkout@v4
         with:
@@ -94,7 +101,7 @@ jobs:
             exit 1
           fi
           whitesmith comment . \
-            --number "${{ github.event.issue.number }}" \
+            --number "${{ github.event.issue.number || github.event.pull_request.number }}" \
             --body-file .whitesmith-comment-body.txt \
             --provider "$PROVIDER" \
             --model "$MODEL" \
@@ -105,16 +112,27 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
-            -f content="+1"
+          if [ "${{ github.event_name }}" = "pull_request_review_comment" ]; then
+            gh api repos/${{ github.repository }}/pulls/comments/${{ github.event.comment.id }}/reactions \
+              -f content="+1"
+          else
+            gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
+              -f content="+1"
+          fi
 
       - name: React with X and comment on failure
         if: failure()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
         run: |
-          gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
-            -f content="-1"
-          gh issue comment ${{ github.event.issue.number }} \
+          if [ "${{ github.event_name }}" = "pull_request_review_comment" ]; then
+            gh api repos/${{ github.repository }}/pulls/comments/${{ github.event.comment.id }}/reactions \
+              -f content="-1"
+          else
+            gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
+              -f content="-1"
+          fi
+          gh issue comment $ISSUE_NUMBER \
             --repo ${{ github.repository }} \
             --body "❌ Agent run failed for [this comment](${{ github.event.comment.html_url }}). Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
