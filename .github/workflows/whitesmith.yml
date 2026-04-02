@@ -87,6 +87,20 @@ jobs:
           echo "$PI_AUTH_JSON" > ~/.pi/agent/auth.json
           chmod 600 ~/.pi/agent/auth.json
           echo "Configured pi auth from PI_AUTH_JSON"
+          echo "Auth file exists: $(test -f ~/.pi/agent/auth.json && echo yes || echo no)"
+          echo "Auth file size: $(wc -c < ~/.pi/agent/auth.json) bytes"
+          echo "Auth providers: $(cat ~/.pi/agent/auth.json | node -e "process.stdin.on('data',d=>{try{console.log(Object.keys(JSON.parse(d)).join(','))}catch(e){console.log('PARSE ERROR:',e.message)}})")"
+
+      - name: Verify pi auth
+        run: |
+          echo "HOME=$HOME"
+          echo "Auth file: $(ls -la ~/.pi/agent/auth.json 2>&1)"
+          echo "Lock files: $(ls -la ~/.pi/agent/auth.json.lock 2>&1 || echo none)"
+          echo "Testing pi directly..."
+          pi --print --no-tools --no-session --provider "${{ inputs.provider || vars.WHITESMITH_PROVIDER }}" --model "${{ inputs.model || vars.WHITESMITH_MODEL }}" "say OK" || {
+            echo "pi direct test failed, checking with PI_CODING_AGENT_DIR..."
+            PI_CODING_AGENT_DIR="$HOME/.pi/agent" pi --print --no-tools --no-session --provider "${{ inputs.provider || vars.WHITESMITH_PROVIDER }}" --model "${{ inputs.model || vars.WHITESMITH_MODEL }}" "say OK"
+          }
 
       - name: Run whitesmith
         env:

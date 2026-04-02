@@ -1,5 +1,6 @@
 import {exec, execSync} from 'node:child_process';
 import * as fs from 'node:fs';
+import {homedir} from 'node:os';
 import * as path from 'node:path';
 import type {AgentHarness, AgentHarnessConfig} from './agent-harness.js';
 
@@ -48,10 +49,28 @@ export class PiHarness implements AgentHarness {
 			);
 		}
 
+		// Check auth.json exists and has the expected provider
+		const homeDir = process.env.HOME || homedir();
+		const authJsonPath = path.join(homeDir, '.pi', 'agent', 'auth.json');
+		if (fs.existsSync(authJsonPath)) {
+			try {
+				const authData = JSON.parse(fs.readFileSync(authJsonPath, 'utf-8'));
+				const providers = Object.keys(authData);
+				console.log(`Auth file found at ${authJsonPath} with providers: ${providers.join(', ')}`);
+				if (!authData[this.provider]) {
+					console.warn(`WARNING: Provider '${this.provider}' not found in auth.json (has: ${providers.join(', ')})`);
+				}
+			} catch (e: any) {
+				console.warn(`WARNING: Could not parse auth.json: ${e.message}`);
+			}
+		} else {
+			console.warn(`WARNING: No auth.json found at ${authJsonPath}`);
+		}
+
 		// Validate auth by making a minimal API call
 		try {
 			const result = execSync(
-				`${this.cmd} --print --no-tools --provider ${this.provider} --model ${this.model} "respond with OK"`,
+				`${this.cmd} --print --no-tools --no-session --provider ${this.provider} --model ${this.model} "respond with OK"`,
 				{stdio: 'pipe', timeout: 30_000},
 			);
 			const output = result.toString().trim();
@@ -60,11 +79,16 @@ export class PiHarness implements AgentHarness {
 			}
 			console.log(`Auth check passed (response: ${output.slice(0, 20)})`);
 		} catch (error: any) {
-			const stderr = error.stderr?.toString() || error.message || '';
+			const stderr = error.stderr?.toString() || '';
+			const stdout = error.stdout?.toString() || '';
+			const details = [stderr, stdout].filter(Boolean).join('\n') || error.message || 'unknown error';
 			throw new Error(
 				`Agent auth validation failed. Ensure valid credentials are configured.\n` +
 					`Set ANTHROPIC_API_KEY or configure OAuth via ~/.pi/agent/auth.json\n` +
-					`Details: ${stderr.slice(0, 500)}`,
+					`Auth file path: ${authJsonPath}\n` +
+					`Auth file exists: ${fs.existsSync(authJsonPath)}\n` +
+					`HOME: ${homeDir}\n` +
+					`Details: ${details.slice(0, 800)}`,
 			);
 		}
 	}
