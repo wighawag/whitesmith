@@ -76,6 +76,8 @@ export interface DevPulseConfig {
 	noPush: boolean;
 	/** Skip sleep between iterations (for testing) */
 	noSleep: boolean;
+	/** Print what would be done without executing it */
+	dryRun: boolean;
 	/** Log file path */
 	logFile?: string;
 	/** GitHub repo in "owner/repo" format (auto-detected if not set) */

@@ -46,6 +46,7 @@ export function buildCli(): Command {
 		.option('--log-file <path>', 'Log agent output to file')
 		.option('--no-push', 'Skip pushing and PR creation')
 		.option('--no-sleep', 'Skip sleep between iterations')
+		.option('--dry-run', 'Print what would be done without executing it')
 		.action(async (workDir: string, opts) => {
 			const config: DevPulseConfig = {
 				agentCmd: opts.agentCmd,
@@ -55,6 +56,7 @@ export function buildCli(): Command {
 				workDir: path.resolve(workDir),
 				noPush: opts.push === false,
 				noSleep: opts.sleep === false,
+				dryRun: opts.dryRun ?? false,
 				logFile: opts.logFile,
 				repo: opts.repo,
 			};

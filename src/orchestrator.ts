@@ -41,13 +41,16 @@ export class Orchestrator {
 		console.log(`Model: ${this.config.model}`);
 		console.log('');
 
-		// Validate agent is available before doing anything
-		await this.agent.validate();
-		console.log('Agent validated successfully.');
-		console.log('');
+		// Skip agent validation and label creation in dry-run mode
+		if (!this.config.dryRun) {
+			// Validate agent is available before doing anything
+			await this.agent.validate();
+			console.log('Agent validated successfully.');
+			console.log('');
 
-		// Ensure labels exist
-		await this.issues.ensureLabels(Object.values(LABELS));
+			// Ensure labels exist
+			await this.issues.ensureLabels(Object.values(LABELS));
+		}
 
 		for (let i = 1; i <= this.config.maxIterations; i++) {
 			console.log('');
@@ -60,6 +63,24 @@ export class Orchestrator {
 			// Decide what to do
 			const action = await this.decideAction();
 			console.log(`Action: ${action.type}`);
+
+			if (this.config.dryRun) {
+				switch (action.type) {
+					case 'reconcile':
+						console.log(`Would reconcile issue #${action.issue.number}: ${action.issue.title}`);
+						break;
+					case 'investigate':
+						console.log(`Would investigate issue #${action.issue.number}: ${action.issue.title}`);
+						break;
+					case 'implement':
+						console.log(`Would implement task ${action.task.id}: ${action.task.title} (issue #${action.issue.number})`);
+						break;
+					case 'idle':
+						console.log('Nothing to do. All issues are either in-progress or completed.');
+						break;
+				}
+				return;
+			}
 
 			switch (action.type) {
 				case 'reconcile':
