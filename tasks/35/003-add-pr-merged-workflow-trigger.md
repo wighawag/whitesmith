@@ -9,9 +9,11 @@ depends_on: ["35-001"]
 
 When an `investigate/<N>` PR is merged (task proposal accepted), implementation should start immediately rather than waiting for the next cron tick. Similarly, when an `issue/<N>` PR is merged (implementation complete), the issue should be reconciled immediately.
 
-Extend the existing `whitesmith-reconcile.yml` workflow (which already triggers on `pull_request: [closed]`) to also kick off `whitesmith run --issue <N>` when a whitesmith-managed PR is merged. Currently reconcile only runs `whitesmith reconcile .` which handles label transitions but doesn't start implementation.
+Update the `generateReconcileWorkflow()` function in `src/providers/github-ci.ts` to generate an enhanced `whitesmith-reconcile.yml` workflow that also kicks off `whitesmith run --issue <N>` when a whitesmith-managed PR is merged. Currently the generated reconcile workflow only runs `whitesmith reconcile .` which handles label transitions but doesn't start implementation.
 
-The workflow needs to:
+**Important**: Do NOT create or modify static workflow files under `.github/workflows/` directly. GitHub does not allow workflows to modify workflow files. Only modify the generator functions in `src/providers/github-ci.ts`. The user will run `install-ci` to regenerate workflows after these code changes.
+
+The generated workflow needs to:
 
 1. Detect the type of merged PR from the branch name using a regex pattern:
    - `investigate/<N>`: Extract `<N>` via `echo "$BRANCH" | sed -n 's|^investigate/\([0-9]*\)$|\1|p'`.
@@ -26,8 +28,8 @@ The workflow needs to:
 
 ## Acceptance Criteria
 
-- When an `investigate/<N>` PR is merged, `whitesmith run . --issue <N>` is triggered to start implementation immediately.
-- When an `issue/<N>` PR is merged, `whitesmith reconcile .` runs (existing behavior preserved).
+- The `generateReconcileWorkflow()` function in `github-ci.ts` is updated to generate a workflow that, when an `investigate/<N>` PR is merged, runs `whitesmith run . --issue <N>` to start implementation immediately.
+- The generated workflow, when an `issue/<N>` PR is merged, runs `whitesmith reconcile .` (existing behavior preserved).
 - Concurrency group `whitesmith-issue-<N>` prevents parallel runs for the same issue (same pattern as `whitesmith-issue.yml`).
 - For PRs whose branches don't match `investigate/<N>` or `issue/<N>` patterns, use a generic concurrency group (e.g., `whitesmith-reconcile-other`) to avoid interference. The concurrency group expression should be conditional:
   ```yaml
@@ -42,17 +44,17 @@ The workflow needs to:
 
 ## Implementation Notes
 
-- Modify `.github/workflows/whitesmith-reconcile.yml`:
-  - Add a job step that parses `github.event.pull_request.head.ref` to detect branch type.
-  - Use regex to extract the issue number: `echo "$BRANCH" | sed -n 's|^investigate/\([0-9]*\)$|\1|p'` for investigate branches, and similarly for issue branches.
-  - For `investigate/<N>` branches: run `whitesmith run . --issue <N> --provider "$WHITESMITH_PROVIDER" --model "$WHITESMITH_MODEL"` (needs AI credentials).
-  - For `issue/<N>` branches: run `whitesmith reconcile .` (no AI needed).
-  - For non-matching branches: run `whitesmith reconcile .` (existing behavior).
-  - Use concurrency group `whitesmith-issue-<N>` (same as issue-opened workflow) so they don't conflict. For non-whitesmith PRs, use a generic group like `whitesmith-reconcile-other`.
+- **Do NOT create or modify any files under `.github/workflows/`**. Only modify `src/providers/github-ci.ts`.
 - Update `src/providers/github-ci.ts`: update `generateReconcileWorkflow()` to accept the `CIConfig` parameter.
   - **Breaking change**: The current `generateReconcileWorkflow()` takes no arguments. It now needs to accept `config: CIConfig` to include AI provider env vars via `generateTopLevelEnv(config)`.
   - Update the call site in `installGitHubCI()` to pass the config.
-  - The reconcile workflow now needs AI provider env vars and permissions for the investigate-PR-merged case.
+  - The generated reconcile workflow should parse `github.event.pull_request.head.ref` to detect branch type.
+  - Use regex to extract the issue number: `echo "$BRANCH" | sed -n 's|^investigate/\([0-9]*\)$|\1|p'` for investigate branches, and similarly for issue branches.
+  - For `investigate/<N>` branches: generate a step that runs `whitesmith run . --issue <N> --provider "$WHITESMITH_PROVIDER" --model "$WHITESMITH_MODEL"` (needs AI credentials).
+  - For `issue/<N>` branches: generate a step that runs `whitesmith reconcile .` (no AI needed).
+  - For non-matching branches: generate a step that runs `whitesmith reconcile .` (existing behavior).
+  - Use concurrency group `whitesmith-issue-<N>` (same as issue-opened workflow) so they don't conflict. For non-whitesmith PRs, use a generic group like `whitesmith-reconcile-other`.
+  - The generated reconcile workflow now needs AI provider env vars and permissions for the investigate-PR-merged case.
   - Consider splitting into two jobs: one for reconcile (lightweight, no AI) and one for implementation (needs AI setup).
-- The reconcile workflow's permissions need to be expanded to `contents: write` for the implementation job.
+- The generated reconcile workflow's permissions need to be expanded to `contents: write` for the implementation job.
 - Ensure the `whitesmith-issue.yml` and reconcile workflow share the same concurrency group pattern per issue number.
