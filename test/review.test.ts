@@ -4,7 +4,7 @@ import {
 	buildReviewImplementationPRPrompt,
 	buildReviewTaskCompletionPrompt,
 } from '../src/prompts.js';
-import {detectReviewTarget} from '../src/review.js';
+import {detectReviewTarget, parseReviewVerdict} from '../src/review.js';
 import type {IssueProvider} from '../src/providers/issue-provider.js';
 import type {Issue} from '../src/types.js';
 
@@ -51,6 +51,12 @@ describe('buildReviewTaskProposalPrompt', () => {
 		expect(prompt).toContain('Coverage');
 		expect(prompt).toContain('Clarity');
 		expect(prompt).toContain('Acceptance Criteria');
+	});
+
+	it('includes VERDICT instruction', () => {
+		const prompt = buildReviewTaskProposalPrompt(baseArgs);
+		expect(prompt).toContain('VERDICT: APPROVE');
+		expect(prompt).toContain('VERDICT: REQUEST_CHANGES');
 	});
 
 	it('includes response file path', () => {
@@ -174,6 +180,70 @@ describe('buildReviewTaskCompletionPrompt', () => {
 			implPRUrl: 'https://github.com/org/repo/pull/11',
 		});
 		expect(prompt).toContain('https://github.com/org/repo/pull/11');
+	});
+});
+
+// --- parseReviewVerdict tests ---
+
+describe('parseReviewVerdict', () => {
+	it('parses VERDICT: APPROVE', () => {
+		expect(parseReviewVerdict('VERDICT: APPROVE\n\nLooks good!')).toBe('approve');
+	});
+
+	it('parses VERDICT: APPROVED', () => {
+		expect(parseReviewVerdict('VERDICT: APPROVED\n\nAll good.')).toBe('approve');
+	});
+
+	it('parses VERDICT: REQUEST_CHANGES', () => {
+		expect(parseReviewVerdict('VERDICT: REQUEST_CHANGES\n\nNeeds work.')).toBe('request_changes');
+	});
+
+	it('parses verdict with bold markdown', () => {
+		expect(parseReviewVerdict('**VERDICT**: APPROVE\n\nNice.')).toBe('approve');
+	});
+
+	it('parses verdict case-insensitively', () => {
+		expect(parseReviewVerdict('verdict: approve\nGreat!')).toBe('approve');
+	});
+
+	it('parses verdict with leading whitespace', () => {
+		expect(parseReviewVerdict('  VERDICT: REQUEST_CHANGES\nBad.')).toBe('request_changes');
+	});
+
+	it('detects REJECT in verdict value', () => {
+		expect(parseReviewVerdict('VERDICT: REJECT\nNo way.')).toBe('request_changes');
+	});
+
+	it('falls back to overall assessment approve pattern', () => {
+		expect(parseReviewVerdict('Some text\n\nOverall Assessment: Approve\nDone.')).toBe('approve');
+	});
+
+	it('falls back to overall assessment request changes pattern', () => {
+		expect(parseReviewVerdict('Some text\n\nOverall Assessment: Request Changes\nNope.')).toBe(
+			'request_changes',
+		);
+	});
+
+	it('falls back to ✅ approved emoji pattern', () => {
+		expect(parseReviewVerdict('\n✅ Approved\nShip it.')).toBe('approve');
+	});
+
+	it('falls back to ❌ request changes emoji pattern', () => {
+		expect(parseReviewVerdict('\n❌ Request Changes\nFix it.')).toBe('request_changes');
+	});
+
+	it('returns unknown for null response', () => {
+		expect(parseReviewVerdict(null)).toBe('unknown');
+	});
+
+	it('returns unknown for unrecognized text', () => {
+		expect(parseReviewVerdict('This is some random review text without a verdict.')).toBe(
+			'unknown',
+		);
+	});
+
+	it('returns unknown for empty string', () => {
+		expect(parseReviewVerdict('')).toBe('unknown');
 	});
 });
 

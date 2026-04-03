@@ -313,7 +313,7 @@ export function buildCli(): Command {
 					console.log(`Auto-detected review type: ${target.type}`);
 				}
 
-				await performReview(
+				const result = await performReview(
 					target,
 					{
 						workDir: resolvedDir,
@@ -324,6 +324,8 @@ export function buildCli(): Command {
 					issues,
 					agent,
 				);
+
+				console.log(`\nVerdict: ${result.verdict}`);
 			} catch (error) {
 				console.error('ERROR:', error instanceof Error ? error.message : error);
 				process.exit(1);

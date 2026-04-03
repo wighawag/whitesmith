@@ -93,7 +93,9 @@ Test task.
 const mockRemoteFileExists = vi.fn().mockResolvedValue(true);
 const mockRemotePathHasFiles = vi.fn().mockResolvedValue(true);
 
-const mockPerformReview = vi.fn().mockResolvedValue('Review looks good.');
+const mockPerformReview = vi
+	.fn()
+	.mockResolvedValue({response: 'Review looks good.', verdict: 'approve'});
 
 vi.mock('../src/review.js', () => ({
 	performReview: (...args: unknown[]) => mockPerformReview(...args),
@@ -127,7 +129,9 @@ describe('Orchestrator', () => {
 		// Reset shared git mocks to defaults
 		mockRemoteFileExists.mockReset().mockResolvedValue(true);
 		mockRemotePathHasFiles.mockReset().mockResolvedValue(true);
-		mockPerformReview.mockReset().mockResolvedValue('Review looks good.');
+		mockPerformReview
+			.mockReset()
+			.mockResolvedValue({response: 'Review looks good.', verdict: 'approve'});
 	});
 
 	afterEach(() => {
@@ -872,6 +876,213 @@ describe('Orchestrator', () => {
 
 			// PR was still created before review failed
 			expect(issues.createPR).toHaveBeenCalled();
+		});
+
+		it('skips investigate review when auto-work is enabled (auto-approve will review)', async () => {
+			const issue = makeIssue({number: 76, title: 'Auto-work skip review'});
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [];
+						if (opts?.noLabels) return [issue];
+						return [];
+					}),
+			});
+
+			const agent = createMockAgent({
+				run: vi.fn().mockImplementation(async () => {
+					writeTaskFile(tmpDir, 76, 1, 'the-task');
+					return {output: 'done', exitCode: 0};
+				}),
+			});
+
+			const config = createConfig(tmpDir, {noPush: false, review: true, autoWork: true});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// PR should be created
+			expect(issues.createPR).toHaveBeenCalled();
+			// Review should NOT be triggered during investigate (auto-approve handles it)
+			expect(mockPerformReview).not.toHaveBeenCalled();
+		});
+
+		it('auto-approve runs review and merges when review approves', async () => {
+			const issue = makeIssue({number: 80, title: 'Approved', labels: [LABELS.TASKS_PROPOSED]});
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [];
+						if (opts?.labels?.includes(LABELS.TASKS_PROPOSED)) return [issue];
+						return [];
+					}),
+				getPRForBranch: vi.fn().mockResolvedValue({
+					state: 'open',
+					url: 'https://github.com/test/repo/pull/81',
+					number: 81,
+				}),
+			});
+
+			mockPerformReview.mockResolvedValue({
+				response: 'VERDICT: APPROVE\n\nLooks good!',
+				verdict: 'approve',
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir, {autoWork: true, review: true});
+
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Review should have been called
+			expect(mockPerformReview).toHaveBeenCalled();
+			// PR should be merged (review approved)
+			expect(issues.mergePR).toHaveBeenCalledWith(81);
+			// Labels should transition
+			expect(issues.removeLabel).toHaveBeenCalledWith(80, LABELS.TASKS_PROPOSED);
+			expect(issues.addLabel).toHaveBeenCalledWith(80, LABELS.TASKS_ACCEPTED);
+		});
+
+		it('auto-approve skips merge when review requests changes', async () => {
+			const issue = makeIssue({number: 82, title: 'Rejected', labels: [LABELS.TASKS_PROPOSED]});
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [];
+						if (opts?.labels?.includes(LABELS.TASKS_PROPOSED)) return [issue];
+						return [];
+					}),
+				getPRForBranch: vi.fn().mockResolvedValue({
+					state: 'open',
+					url: 'https://github.com/test/repo/pull/83',
+					number: 83,
+				}),
+			});
+
+			mockPerformReview.mockResolvedValue({
+				response: 'VERDICT: REQUEST_CHANGES\n\nTasks are too vague.',
+				verdict: 'request_changes',
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir, {autoWork: true, review: true});
+
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Review should have been called
+			expect(mockPerformReview).toHaveBeenCalled();
+			// PR should NOT be merged
+			expect(issues.mergePR).not.toHaveBeenCalled();
+			// Should post a comment explaining the skip
+			expect(issues.comment).toHaveBeenCalledWith(82, expect.stringContaining('requested changes'));
+			// Should remove tasks-proposed to prevent retry loop
+			expect(issues.removeLabel).toHaveBeenCalledWith(82, LABELS.TASKS_PROPOSED);
+			// Should NOT add tasks-accepted
+			expect(issues.addLabel).not.toHaveBeenCalledWith(82, LABELS.TASKS_ACCEPTED);
+		});
+
+		it('auto-approve proceeds with merge when review verdict is unknown', async () => {
+			const issue = makeIssue({
+				number: 84,
+				title: 'Unknown verdict',
+				labels: [LABELS.TASKS_PROPOSED],
+			});
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [];
+						if (opts?.labels?.includes(LABELS.TASKS_PROPOSED)) return [issue];
+						return [];
+					}),
+				getPRForBranch: vi.fn().mockResolvedValue({
+					state: 'open',
+					url: 'https://github.com/test/repo/pull/85',
+					number: 85,
+				}),
+			});
+
+			mockPerformReview.mockResolvedValue({
+				response: 'Some review without a clear verdict.',
+				verdict: 'unknown',
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir, {autoWork: true, review: true});
+
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Review ran but verdict unknown — proceed with merge
+			expect(mockPerformReview).toHaveBeenCalled();
+			expect(issues.mergePR).toHaveBeenCalledWith(85);
+			expect(issues.addLabel).toHaveBeenCalledWith(84, LABELS.TASKS_ACCEPTED);
+		});
+
+		it('auto-approve proceeds with merge when review throws', async () => {
+			const issue = makeIssue({number: 86, title: 'Review error', labels: [LABELS.TASKS_PROPOSED]});
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [];
+						if (opts?.labels?.includes(LABELS.TASKS_PROPOSED)) return [issue];
+						return [];
+					}),
+				getPRForBranch: vi.fn().mockResolvedValue({
+					state: 'open',
+					url: 'https://github.com/test/repo/pull/87',
+					number: 87,
+				}),
+			});
+
+			mockPerformReview.mockRejectedValue(new Error('Agent crashed'));
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir, {autoWork: true, review: true});
+
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Review failed but merge should still proceed (fail-open)
+			expect(issues.mergePR).toHaveBeenCalledWith(87);
+		});
+
+		it('auto-approve without review merges immediately', async () => {
+			const issue = makeIssue({number: 88, title: 'No review', labels: [LABELS.TASKS_PROPOSED]});
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [];
+						if (opts?.labels?.includes(LABELS.TASKS_PROPOSED)) return [issue];
+						return [];
+					}),
+				getPRForBranch: vi.fn().mockResolvedValue({
+					state: 'open',
+					url: 'https://github.com/test/repo/pull/89',
+					number: 89,
+				}),
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir, {autoWork: true, review: false});
+
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// No review, direct merge
+			expect(mockPerformReview).not.toHaveBeenCalled();
+			expect(issues.mergePR).toHaveBeenCalledWith(89);
 		});
 	});
 

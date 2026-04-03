@@ -124,8 +124,20 @@ can implement them without ambiguity.
 2. **Read each task file** carefully.
 3. **Write your review** to \`${args.responseFile}\`.
 
-Your review should be structured as:
-- An overall assessment (approve / request changes)
+Your review MUST start with a verdict line as the very first line:
+
+\`\`\`
+VERDICT: APPROVE
+\`\`\`
+
+or:
+
+\`\`\`
+VERDICT: REQUEST_CHANGES
+\`\`\`
+
+Followed by:
+- An overall assessment explaining your verdict
 - Per-task feedback (if any issues found)
 - Suggestions for improvement
 - Any missing tasks or concerns
@@ -196,8 +208,20 @@ You are performing a detailed code review of this pull request. You are on the P
 3. **Read the changed files** in full context.
 4. **Write your review** to \`${args.responseFile}\`.
 
-Your review should include:
-- An overall assessment (approve / request changes)
+Your review MUST start with a verdict line as the very first line:
+
+\`\`\`
+VERDICT: APPROVE
+\`\`\`
+
+or:
+
+\`\`\`
+VERDICT: REQUEST_CHANGES
+\`\`\`
+
+Followed by:
+- An overall assessment explaining your verdict
 - Specific issues found (with file paths and line references)
 - Suggestions for improvement
 - Any potential bugs or concerns
@@ -258,8 +282,20 @@ implemented on the \`${args.implBranch}\` branch (you are currently on it).
 4. **Explore the changed code** in full context.
 5. **Write your review** to \`${args.responseFile}\`.
 
-Your review should include:
-- An overall assessment (approve / request changes)
+Your review MUST start with a verdict line as the very first line:
+
+\`\`\`
+VERDICT: APPROVE
+\`\`\`
+
+or:
+
+\`\`\`
+VERDICT: REQUEST_CHANGES
+\`\`\`
+
+Followed by:
+- An overall assessment explaining your verdict
 - Whether each task was properly completed
 - Any bugs, issues, or concerns found
 - Suggestions for improvement

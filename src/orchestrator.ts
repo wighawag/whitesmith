@@ -7,6 +7,7 @@ import {GitManager} from './git.js';
 import {buildInvestigatePrompt, buildImplementPrompt} from './prompts.js';
 import {isAutoWorkEnabled} from './auto-work.js';
 import {performReview} from './review.js';
+import type {ReviewResult} from './review.js';
 
 /**
  * Main orchestrator for whitesmith.
@@ -269,7 +270,8 @@ export class Orchestrator {
 	}
 
 	/**
-	 * Phase 1.5: Auto-approve — merge the task-proposal PR when auto-work is enabled
+	 * Phase 1.5: Auto-approve — merge the task-proposal PR when auto-work is enabled.
+	 * When review is enabled, runs a review first and only merges if approved.
 	 */
 	private async autoApprove(issue: Issue): Promise<void> {
 		console.log(`Auto-approving task PR for issue #${issue.number}: ${issue.title}`);
@@ -280,6 +282,27 @@ export class Orchestrator {
 		if (!pr || pr.state !== 'open') {
 			console.log(`No open PR found for branch '${branch}', skipping auto-approve`);
 			return;
+		}
+
+		// Run review before merging (if review is enabled)
+		if (this.config.review) {
+			let reviewResult: ReviewResult | null = null;
+			try {
+				reviewResult = await this.reviewTaskProposal(issue.number);
+			} catch (error) {
+				console.error('Review failed:', error instanceof Error ? error.message : error);
+			}
+
+			if (reviewResult && reviewResult.verdict === 'request_changes') {
+				console.log(`Review requested changes for task PR #${pr.number}. Skipping auto-merge.`);
+				await this.issues.comment(
+					issue.number,
+					`🔍 Review of task PR #${pr.number} requested changes. Auto-merge skipped — please review manually.`,
+				);
+				// Remove tasks-proposed so auto-approve doesn't retry every iteration
+				await this.issues.removeLabel(issue.number, LABELS.TASKS_PROPOSED);
+				return;
+			}
 		}
 
 		await this.issues.mergePR(pr.number);
@@ -398,10 +421,14 @@ export class Orchestrator {
 
 				console.log(`PR created: ${prUrl}`);
 
-				// Queue review of the task proposal
-				if (this.config.review) {
+				// Queue review of the task proposal (skip if auto-work — auto-approve will review)
+				if (this.config.review && !isAutoWorkEnabled(this.config, issue)) {
 					await this.git.checkoutMain();
-					await this.reviewTaskProposal(issue.number);
+					try {
+						await this.reviewTaskProposal(issue.number);
+					} catch (error) {
+						console.error('Review failed:', error instanceof Error ? error.message : error);
+					}
 					return; // Already on main after review
 				}
 			}
@@ -507,7 +534,11 @@ export class Orchestrator {
 					// Queue review of the implementation PR
 					if (this.config.review) {
 						await this.git.checkoutMain();
-						await this.reviewImplementationPR(issue.number);
+						try {
+							await this.reviewImplementationPR(issue.number);
+						} catch (error) {
+							console.error('Review failed:', error instanceof Error ? error.message : error);
+						}
 						return; // Already on main after review
 					}
 				} else {
@@ -527,46 +558,40 @@ export class Orchestrator {
 	/**
 	 * Review a task proposal (investigate PR).
 	 * Posts the review as a comment on the task proposal PR.
+	 * Returns the review result so callers can check the verdict.
 	 */
-	private async reviewTaskProposal(issueNumber: number): Promise<void> {
+	private async reviewTaskProposal(issueNumber: number): Promise<ReviewResult> {
 		console.log(`Reviewing task proposal for issue #${issueNumber}...`);
-		try {
-			await performReview(
-				{type: 'issue-tasks', issueNumber},
-				{
-					workDir: this.config.workDir,
-					repo: this.config.repo,
-					logFile: this.config.logFile,
-					post: !this.config.noPush,
-				},
-				this.issues,
-				this.agent,
-			);
-		} catch (error) {
-			console.error('Review failed:', error instanceof Error ? error.message : error);
-		}
+		return performReview(
+			{type: 'issue-tasks', issueNumber},
+			{
+				workDir: this.config.workDir,
+				repo: this.config.repo,
+				logFile: this.config.logFile,
+				post: !this.config.noPush,
+			},
+			this.issues,
+			this.agent,
+		);
 	}
 
 	/**
 	 * Review an implementation PR (all tasks completed for an issue).
 	 * Posts the review as a comment on the implementation PR.
+	 * Returns the review result so callers can check the verdict.
 	 */
-	private async reviewImplementationPR(issueNumber: number): Promise<void> {
+	private async reviewImplementationPR(issueNumber: number): Promise<ReviewResult> {
 		console.log(`Reviewing implementation for issue #${issueNumber}...`);
-		try {
-			await performReview(
-				{type: 'issue-tasks-completed', issueNumber},
-				{
-					workDir: this.config.workDir,
-					repo: this.config.repo,
-					logFile: this.config.logFile,
-					post: !this.config.noPush,
-				},
-				this.issues,
-				this.agent,
-			);
-		} catch (error) {
-			console.error('Review failed:', error instanceof Error ? error.message : error);
-		}
+		return performReview(
+			{type: 'issue-tasks-completed', issueNumber},
+			{
+				workDir: this.config.workDir,
+				repo: this.config.repo,
+				logFile: this.config.logFile,
+				post: !this.config.noPush,
+			},
+			this.issues,
+			this.agent,
+		);
 	}
 }

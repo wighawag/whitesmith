@@ -8,8 +8,8 @@ export {
 	buildReviewImplementationPRPrompt,
 	buildReviewTaskCompletionPrompt,
 } from './prompts.js';
-export {performReview, detectReviewTarget} from './review.js';
-export type {ReviewConfig, ReviewTarget} from './review.js';
+export {performReview, detectReviewTarget, parseReviewVerdict} from './review.js';
+export type {ReviewConfig, ReviewTarget, ReviewResult, ReviewVerdict} from './review.js';
 
 export type {IssueProvider} from './providers/issue-provider.js';
 export {GitHubProvider} from './providers/github.js';

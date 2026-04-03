@@ -10,6 +10,15 @@ import {
 	buildReviewTaskCompletionPrompt,
 } from './prompts.js';
 
+export type ReviewVerdict = 'approve' | 'request_changes' | 'unknown';
+
+export interface ReviewResult {
+	/** The full review text (null if agent produced no output) */
+	response: string | null;
+	/** Parsed verdict from the review response */
+	verdict: ReviewVerdict;
+}
+
 export interface ReviewConfig {
 	/** Working directory (the repo) */
 	workDir: string;
@@ -33,12 +42,44 @@ export type ReviewTarget =
  * - `issue-tasks`: Review that proposed tasks are detailed and precise enough
  * - `issue-tasks-completed`: Review that completed tasks were followed properly and check for bugs
  */
+/**
+ * Parse the verdict from the review response text.
+ * Looks for a "VERDICT: APPROVE" or "VERDICT: REQUEST_CHANGES" line.
+ */
+export function parseReviewVerdict(response: string | null): ReviewVerdict {
+	if (!response) return 'unknown';
+
+	// Look for explicit verdict line (case-insensitive)
+	const verdictMatch = response.match(/^\s*\*{0,2}VERDICT\*{0,2}\s*[:：]\s*(\S+)/im);
+	if (verdictMatch) {
+		const v = verdictMatch[1].toLowerCase().replace(/[^a-z_]/g, '');
+		if (v === 'approve' || v === 'approved') return 'approve';
+		if (v.includes('request') || v.includes('change') || v.includes('reject')) {
+			return 'request_changes';
+		}
+	}
+
+	// Fallback: look for common patterns
+	const lower = response.toLowerCase();
+	if (lower.includes('overall assessment: approve') || lower.includes('✅ approved')) {
+		return 'approve';
+	}
+	if (
+		lower.includes('overall assessment: request changes') ||
+		lower.includes('❌ request changes')
+	) {
+		return 'request_changes';
+	}
+
+	return 'unknown';
+}
+
 export async function performReview(
 	target: ReviewTarget,
 	config: ReviewConfig,
 	issues: IssueProvider,
 	agent: AgentHarness,
-): Promise<string | null> {
+): Promise<ReviewResult> {
 	const git = new GitManager(config.workDir);
 	const responseFile = '.whitesmith-review.md';
 
@@ -191,10 +232,12 @@ export async function performReview(
 	// Return to main
 	await git.checkoutMain();
 
+	const verdict = parseReviewVerdict(response);
+
 	if (response) {
 		if (config.post) {
 			await issues.comment(postTarget, response);
-			console.log(`Review posted as comment on #${postTarget}`);
+			console.log(`Review posted as comment on #${postTarget} (verdict: ${verdict})`);
 		} else {
 			process.stdout.write(response);
 		}
@@ -202,7 +245,7 @@ export async function performReview(
 		console.log('Agent did not produce a review response.');
 	}
 
-	return response;
+	return {response, verdict};
 }
 
 /**
