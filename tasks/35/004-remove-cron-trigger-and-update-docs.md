@@ -23,7 +23,12 @@ Also update `README.md` and any other documentation to reflect the new event-dri
   - Comment on issue/PR → respond immediately (existing)
   - Manual `workflow_dispatch` as fallback
 - The `install-ci` command (`src/providers/github-ci.ts`) no longer generates the cron schedule in `generateMainWorkflow()`.
-- The concurrency group on `whitesmith.yml` is updated: instead of a global `whitesmith-loop` group, use per-issue concurrency when `--issue` is specified via `workflow_dispatch`.
+- The concurrency group on `whitesmith.yml` is updated: instead of a global `whitesmith-loop` group, use per-issue concurrency when `--issue` is specified via `workflow_dispatch`. Use the following expression pattern:
+  ```yaml
+  concurrency:
+    group: ${{ inputs.issue && format('whitesmith-issue-{0}', inputs.issue) || 'whitesmith-global' }}
+    cancel-in-progress: false
+  ```
 
 ## Implementation Notes
 
@@ -32,6 +37,12 @@ Also update `README.md` and any other documentation to reflect the new event-dri
   - Add an optional `issue` input to `workflow_dispatch`.
   - Update the `run` step to pass `--issue` when the input is provided.
   - Consider keeping the global scan mode (no `--issue`) as the default for `workflow_dispatch` to handle any missed events.
-- Update `src/providers/github-ci.ts`: remove the `schedule` block from `generateMainWorkflow()`, add the `issue` input.
+  - Update the concurrency group to use a conditional expression:
+    ```yaml
+    concurrency:
+      group: ${{ inputs.issue && format('whitesmith-issue-{0}', inputs.issue) || 'whitesmith-global' }}
+      cancel-in-progress: false
+    ```
+- Update `src/providers/github-ci.ts`: remove the `schedule` block from `generateMainWorkflow()`, add the `issue` input, update the concurrency group expression.
 - Update `README.md` to document the new trigger architecture.
-- Verify that existing `install-ci` tests or workflows still work with the changes.
+- **Note on `install-ci` tests**: There are no dedicated tests for `install-ci` in the test directory. Manual verification is sufficient for this task. Optionally, consider adding basic snapshot or smoke tests for the generated workflow content in a follow-up.

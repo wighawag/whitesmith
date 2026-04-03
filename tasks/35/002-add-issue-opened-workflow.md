@@ -16,17 +16,21 @@ Create a new workflow file `whitesmith-issue.yml` that triggers on `issues: [ope
 - A new workflow file `.github/workflows/whitesmith-issue.yml` is created.
 - The workflow triggers on `issues: [opened]` events.
 - It runs `whitesmith run . --issue ${{ github.event.issue.number }}` with appropriate provider/model/max-iterations args.
+- The `--provider` and `--model` flags are passed using `$WHITESMITH_PROVIDER` and `$WHITESMITH_MODEL` env vars (same as the main workflow): `--provider "$WHITESMITH_PROVIDER" --model "$WHITESMITH_MODEL"`.
 - Concurrency is set per-issue (`whitesmith-issue-<number>`) with `cancel-in-progress: false` to prevent duplicate runs.
 - The workflow uses the existing `.github/actions/setup-whitesmith` composite action.
-- The `install-ci` command (`src/providers/github-ci.ts`) is updated to generate this new workflow file.
-- The workflow includes the same env vars and permissions as the existing `whitesmith.yml`.
+- The `install-ci` command (`src/providers/github-ci.ts`) is updated to generate this new workflow file via a new `generateIssueWorkflow(config: CIConfig)` function.
+- The static `.github/workflows/whitesmith-issue.yml` is committed for **this** repo, AND `github-ci.ts` is updated to generate equivalent workflows for other repos via `install-ci`.
+- The workflow includes the same env vars (via `generateTopLevelEnv(config)`) and permissions as the existing `whitesmith.yml`.
+- Auto-work does **not** need to be passed as a `--auto-work` CLI flag — the orchestrator's `isAutoWorkEnabled()` function already checks the issue's labels and body at runtime. If a global auto-work toggle is desired in the future, it can be added as a workflow input or env var, but this is not required for this task.
 
 ## Implementation Notes
 
-- Create `.github/workflows/whitesmith-issue.yml` with the new trigger.
+- Create `.github/workflows/whitesmith-issue.yml` with the new trigger (static file for this repo).
 - Update `src/providers/github-ci.ts`:
-  - Add a `generateIssueWorkflow(config: CIConfig)` function.
-  - Add it to the files array in `installGitHubCI()`.
-- The workflow should pass `--auto-work` if configured (or the orchestrator can detect it from issue labels).
+  - Add a `generateIssueWorkflow(config: CIConfig)` function that accepts the `CIConfig` parameter (needed for `generateTopLevelEnv(config)` to include provider env vars and API key secrets).
+  - Add it to the files array in `installGitHubCI()` so it is generated for other repos that run `install-ci`.
+- Auto-work does **not** need to be passed as a `--auto-work` CLI flag. The orchestrator's `isAutoWorkEnabled()` function already checks the issue's labels and body at runtime. Per-issue control via labels/body text is sufficient.
 - Use `--max-iterations` with a reasonable default (e.g., 10) since a single issue may need investigate + auto-approve + multiple implement steps.
 - The concurrency group should use the issue number to allow parallel processing of different issues.
+- Ensure `--provider` and `--model` are passed using the same `WHITESMITH_PROVIDER` / `WHITESMITH_MODEL` env vars as the main workflow.
