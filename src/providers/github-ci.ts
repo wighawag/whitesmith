@@ -786,6 +786,8 @@ export interface InstallCIOptions {
 	reviewWorkflow?: boolean;
 	/** Whether the review step is enabled in the main loop (affects review workflow filtering). */
 	reviewStepEnabled?: boolean;
+	/** Skip setting GitHub secrets (useful when reconfiguring workflows only). */
+	skipSecrets?: boolean;
 }
 
 /**
@@ -916,7 +918,11 @@ export async function installGitHubCI(
 
 	// ── Set GitHub secrets via gh CLI ─────────────────────────────────────
 
-	if (!fake && authMode === 'models-json' && repo) {
+	const skipSecrets = options.skipSecrets ?? false;
+
+	if (skipSecrets) {
+		console.log('\n🔑 Skipping secret setup (--no-secrets)');
+	} else if (!fake && authMode === 'models-json' && repo) {
 		if (!ctx.ghAvailable) {
 			console.log('\n⚠ GitHub CLI (gh) is not available or not authenticated.');
 			console.log('  You will need to set the following secrets manually.\n');

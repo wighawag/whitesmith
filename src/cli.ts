@@ -352,6 +352,7 @@ export function buildCli(): Command {
 			'--include-secrets',
 			'With --export-config, prompt for API keys and include them in the JSON output',
 		)
+		.option('--no-secrets', 'Skip setting GitHub secrets (useful when reconfiguring workflows only)')
 		.option('--dev', 'Build whitesmith from source (pnpm i + link --global) instead of npm install')
 		.option('--review-workflow', 'Generate a GitHub Actions workflow for PR reviews')
 		.option(
@@ -378,6 +379,7 @@ export function buildCli(): Command {
 					dev: opts.dev,
 					reviewWorkflow: opts.reviewWorkflow ?? false,
 					reviewStepEnabled: opts.reviewStep !== false,
+					skipSecrets: opts.secrets === false,
 				});
 			} catch (error) {
 				console.error('ERROR:', error instanceof Error ? error.message : error);
