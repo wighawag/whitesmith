@@ -88,6 +88,8 @@ export interface DevPulseConfig {
 	logFile?: string;
 	/** GitHub repo in "owner/repo" format (auto-detected if not set) */
 	repo?: string;
+	/** Target a single issue number (single-issue run mode) */
+	issueNumber?: number;
 }
 
 /**

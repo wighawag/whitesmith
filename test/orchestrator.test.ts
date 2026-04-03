@@ -1086,6 +1086,304 @@ describe('Orchestrator', () => {
 		});
 	});
 
+	describe('single-issue mode (runForIssue)', () => {
+		it('investigates when issue has no whitesmith labels', async () => {
+			const issue = makeIssue({number: 42, title: 'New feature', labels: []});
+
+			const issues = createMockIssueProvider({
+				getIssue: vi.fn().mockResolvedValue(issue),
+			});
+
+			const agent = createMockAgent({
+				run: vi.fn().mockImplementation(async () => {
+					writeTaskFile(tmpDir, 42, 1, 'first-task');
+					return {output: 'done', exitCode: 0};
+				}),
+			});
+
+			const config = createConfig(tmpDir, {issueNumber: 42, maxIterations: 1});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Should fetch the specific issue
+			expect(issues.getIssue).toHaveBeenCalledWith(42);
+			// Should NOT do a global scan
+			expect(issues.listIssues).not.toHaveBeenCalled();
+			// Should investigate
+			expect(issues.addLabel).toHaveBeenCalledWith(42, LABELS.INVESTIGATING);
+			expect(agent.run).toHaveBeenCalledTimes(1);
+		});
+
+		it('implements tasks when issue has tasks-accepted label', async () => {
+			const issue = makeIssue({number: 42, title: 'Feature', labels: [LABELS.TASKS_ACCEPTED]});
+			writeTaskFile(tmpDir, 42, 1, 'do-thing');
+
+			const issues = createMockIssueProvider({
+				getIssue: vi.fn().mockResolvedValue(issue),
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir, {issueNumber: 42, maxIterations: 1});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			expect(issues.getIssue).toHaveBeenCalledWith(42);
+			expect(agent.run).toHaveBeenCalledTimes(1);
+			expect(agent.run).toHaveBeenCalledWith(
+				expect.objectContaining({
+					prompt: expect.stringContaining('42-001'),
+				}),
+			);
+		});
+
+		it('reconciles when issue has tasks-accepted and all tasks done on branch', async () => {
+			const issue = makeIssue({number: 42, title: 'Done', labels: [LABELS.TASKS_ACCEPTED]});
+
+			const issues = createMockIssueProvider({
+				getIssue: vi.fn().mockResolvedValue(issue),
+				remoteBranchExists: vi.fn().mockResolvedValue(true),
+			});
+
+			// No task files on the issue branch = all done
+			mockRemotePathHasFiles.mockResolvedValue(false);
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir, {issueNumber: 42, maxIterations: 1});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			expect(issues.addLabel).toHaveBeenCalledWith(42, LABELS.COMPLETED);
+			expect(issues.removeLabel).toHaveBeenCalledWith(42, LABELS.TASKS_ACCEPTED);
+			expect(issues.closeIssue).toHaveBeenCalledWith(42);
+		});
+
+		it('clears stale investigating label and re-investigates', async () => {
+			const issue = makeIssue({number: 42, title: 'Stale', labels: [LABELS.INVESTIGATING]});
+
+			const issues = createMockIssueProvider({
+				getIssue: vi.fn().mockResolvedValue(issue),
+			});
+
+			const agent = createMockAgent({
+				run: vi.fn().mockImplementation(async () => {
+					writeTaskFile(tmpDir, 42, 1, 'task');
+					return {output: 'done', exitCode: 0};
+				}),
+			});
+
+			const config = createConfig(tmpDir, {issueNumber: 42, maxIterations: 1});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Should clear the stale investigating label
+			expect(issues.removeLabel).toHaveBeenCalledWith(42, LABELS.INVESTIGATING);
+			// Should re-investigate
+			expect(issues.addLabel).toHaveBeenCalledWith(42, LABELS.INVESTIGATING);
+			expect(agent.run).toHaveBeenCalledTimes(1);
+		});
+
+		it('transitions tasks-proposed to tasks-accepted when tasks exist on main', async () => {
+			const issue = makeIssue({number: 42, title: 'Merged PR', labels: [LABELS.TASKS_PROPOSED]});
+			// Tasks exist on main (PR was merged)
+			writeTaskFile(tmpDir, 42, 1, 'task-a');
+
+			const issues = createMockIssueProvider({
+				getIssue: vi.fn().mockResolvedValue(issue),
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir, {issueNumber: 42, maxIterations: 1});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Should transition labels inline
+			expect(issues.removeLabel).toHaveBeenCalledWith(42, LABELS.TASKS_PROPOSED);
+			expect(issues.addLabel).toHaveBeenCalledWith(42, LABELS.TASKS_ACCEPTED);
+			// Should proceed to implement the task
+			expect(agent.run).toHaveBeenCalledTimes(1);
+			expect(agent.run).toHaveBeenCalledWith(
+				expect.objectContaining({
+					prompt: expect.stringContaining('42-001'),
+				}),
+			);
+		});
+
+		it('auto-approves when tasks-proposed and auto-work enabled (no tasks on main)', async () => {
+			const issue = makeIssue({number: 42, title: 'Auto', labels: [LABELS.TASKS_PROPOSED]});
+
+			const issues = createMockIssueProvider({
+				getIssue: vi.fn().mockResolvedValue(issue),
+				getPRForBranch: vi.fn().mockResolvedValue({
+					state: 'open',
+					url: 'https://github.com/test/repo/pull/99',
+					number: 99,
+				}),
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir, {issueNumber: 42, maxIterations: 1, autoWork: true});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// No tasks on main, so it should auto-approve (not transition)
+			expect(issues.mergePR).toHaveBeenCalledWith(99);
+		});
+
+		it('goes idle when issue has tasks-proposed, no auto-work, and no tasks on main', async () => {
+			const issue = makeIssue({number: 42, title: 'Waiting', labels: [LABELS.TASKS_PROPOSED]});
+
+			const issues = createMockIssueProvider({
+				getIssue: vi.fn().mockResolvedValue(issue),
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir, {issueNumber: 42, maxIterations: 1});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Should not do anything
+			expect(agent.run).not.toHaveBeenCalled();
+			expect(issues.mergePR).not.toHaveBeenCalled();
+		});
+
+		it('goes idle when issue has completed label', async () => {
+			const issue = makeIssue({number: 42, title: 'Done', labels: [LABELS.COMPLETED]});
+
+			const issues = createMockIssueProvider({
+				getIssue: vi.fn().mockResolvedValue(issue),
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir, {issueNumber: 42, maxIterations: 1});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			expect(agent.run).not.toHaveBeenCalled();
+		});
+
+		it('re-fetches issue after each action to get updated labels', async () => {
+			// First fetch: no labels (investigate)
+			// Second fetch: tasks-proposed + tasks on main (transition to tasks-accepted + implement)
+			const issueFetch1 = makeIssue({number: 42, title: 'Pipeline', labels: []});
+			const issueFetch2 = makeIssue({number: 42, title: 'Pipeline', labels: [LABELS.TASKS_PROPOSED]});
+
+			const getIssueMock = vi
+				.fn()
+				.mockResolvedValueOnce(issueFetch1)
+				.mockResolvedValueOnce(issueFetch2);
+
+			const issues = createMockIssueProvider({
+				getIssue: getIssueMock,
+			});
+
+			const agent = createMockAgent({
+				run: vi
+					.fn()
+					.mockImplementationOnce(async () => {
+						// Investigate: create task files
+						writeTaskFile(tmpDir, 42, 1, 'task-a');
+						return {output: 'done', exitCode: 0};
+					})
+					.mockResolvedValueOnce({output: 'done', exitCode: 0}),
+			});
+
+			const config = createConfig(tmpDir, {issueNumber: 42, maxIterations: 2});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// getIssue should have been called twice (once per iteration)
+			expect(getIssueMock).toHaveBeenCalledTimes(2);
+			// Agent should be called twice: investigate + implement
+			expect(agent.run).toHaveBeenCalledTimes(2);
+		});
+
+		it('respects max-iterations limit', async () => {
+			// Issue always returns no labels -> investigate each time
+			const issue = makeIssue({number: 42, title: 'Looper', labels: []});
+
+			const issues = createMockIssueProvider({
+				getIssue: vi.fn().mockResolvedValue(issue),
+			});
+
+			const agent = createMockAgent({
+				run: vi.fn().mockImplementation(async () => {
+					writeTaskFile(tmpDir, 42, 1, 'task');
+					return {output: 'done', exitCode: 0};
+				}),
+			});
+
+			const config = createConfig(tmpDir, {issueNumber: 42, maxIterations: 3});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Should stop after 3 iterations
+			expect(agent.run).toHaveBeenCalledTimes(3);
+		});
+
+		it('dry-run works with --issue', async () => {
+			const issue = makeIssue({number: 42, title: 'Dry run', labels: []});
+
+			const issues = createMockIssueProvider({
+				getIssue: vi.fn().mockResolvedValue(issue),
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir, {issueNumber: 42, dryRun: true});
+
+			const consoleSpy = vi.spyOn(console, 'log');
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			expect(consoleSpy).toHaveBeenCalledWith(
+				expect.stringContaining('Would investigate issue #42'),
+			);
+			expect(agent.run).not.toHaveBeenCalled();
+			consoleSpy.mockRestore();
+		});
+
+		it('does not scan other issues when --issue is set', async () => {
+			const issue = makeIssue({number: 42, title: 'Solo', labels: [LABELS.COMPLETED]});
+
+			const issues = createMockIssueProvider({
+				getIssue: vi.fn().mockResolvedValue(issue),
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir, {issueNumber: 42, maxIterations: 5});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// listIssues should never be called in single-issue mode
+			expect(issues.listIssues).not.toHaveBeenCalled();
+		});
+
+		it('uses isAutoWorkEnabled to detect auto-work via issue label', async () => {
+			const issue = makeIssue({
+				number: 42,
+				title: 'Label auto',
+				labels: [LABELS.TASKS_PROPOSED, LABELS.AUTO_WORK],
+			});
+
+			const issues = createMockIssueProvider({
+				getIssue: vi.fn().mockResolvedValue(issue),
+				getPRForBranch: vi.fn().mockResolvedValue({
+					state: 'open',
+					url: 'https://github.com/test/repo/pull/99',
+					number: 99,
+				}),
+			});
+
+			const agent = createMockAgent();
+			// autoWork is false in config, but issue has the label
+			const config = createConfig(tmpDir, {issueNumber: 42, maxIterations: 1});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Should auto-approve because issue has AUTO_WORK label
+			expect(issues.mergePR).toHaveBeenCalledWith(99);
+		});
+	});
+
 	describe('push mode', () => {
 		it('creates PR when noPush is false during investigate', async () => {
 			const issue = makeIssue({number: 8});

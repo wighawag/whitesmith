@@ -46,6 +46,9 @@ export class Orchestrator {
 		console.log(`Agent command: ${this.config.agentCmd}`);
 		console.log(`Provider: ${this.config.provider}`);
 		console.log(`Model: ${this.config.model}`);
+		if (this.config.issueNumber !== undefined) {
+			console.log(`Target issue: #${this.config.issueNumber}`);
+		}
 		console.log('');
 
 		// Skip agent validation and label creation in dry-run mode
@@ -57,6 +60,12 @@ export class Orchestrator {
 
 			// Ensure labels exist
 			await this.issues.ensureLabels(Object.values(LABELS));
+		}
+
+		// Delegate to single-issue mode if --issue is set
+		if (this.config.issueNumber !== undefined) {
+			await this.runForIssue(this.config.issueNumber);
+			return;
 		}
 
 		for (let i = 1; i <= this.config.maxIterations; i++) {
@@ -122,6 +131,146 @@ export class Orchestrator {
 
 		console.log('');
 		console.log('=== Iteration limit reached ===');
+	}
+
+	/**
+	 * Run the full pipeline for a single issue.
+	 *
+	 * Re-fetches the issue after each action to get updated labels, then decides
+	 * the next action based on the current state. Loops until idle or the
+	 * iteration limit is reached.
+	 */
+	private async runForIssue(issueNumber: number): Promise<void> {
+		console.log(`Running single-issue mode for issue #${issueNumber}`);
+
+		for (let i = 1; i <= this.config.maxIterations; i++) {
+			console.log('');
+			console.log(`=== Iteration ${i}/${this.config.maxIterations} ===`);
+
+			// Make sure we're on main with latest
+			await this.git.fetch();
+			await this.git.checkoutMain();
+
+			// Re-fetch the issue to get current labels
+			const issue = await this.issues.getIssue(issueNumber);
+
+			// Determine the action based on the issue's current state
+			const action = await this.decideActionForIssue(issue);
+			console.log(`Action: ${action.type}`);
+
+			if (this.config.dryRun) {
+				switch (action.type) {
+					case 'reconcile':
+						console.log(`Would reconcile issue #${action.issue.number}: ${action.issue.title}`);
+						break;
+					case 'auto-approve':
+						console.log(
+							`Would auto-approve task PR for issue #${action.issue.number}: ${action.issue.title}`,
+						);
+						break;
+					case 'investigate':
+						console.log(`Would investigate issue #${action.issue.number}: ${action.issue.title}`);
+						break;
+					case 'implement':
+						console.log(
+							`Would implement task ${action.task.id}: ${action.task.title} (issue #${action.issue.number})`,
+						);
+						break;
+					case 'idle':
+						console.log('Nothing to do. Issue is either completed or no actions are applicable.');
+						break;
+				}
+				return;
+			}
+
+			switch (action.type) {
+				case 'reconcile':
+					await this.reconcile(action.issue);
+					break;
+				case 'auto-approve':
+					await this.autoApprove(action.issue);
+					break;
+				case 'investigate':
+					await this.investigate(action.issue);
+					break;
+				case 'implement':
+					await this.implement(action.task, action.issue);
+					break;
+				case 'idle':
+					console.log('Nothing to do. Issue is either completed or no actions are applicable.');
+					return;
+			}
+
+			if (!this.config.noSleep && i < this.config.maxIterations) {
+				console.log('Sleeping 5s...');
+				await new Promise((r) => setTimeout(r, 5000));
+			}
+		}
+
+		console.log('');
+		console.log('=== Iteration limit reached ===');
+	}
+
+	/**
+	 * Decide the next action for a single issue based on its current labels.
+	 */
+	private async decideActionForIssue(issue: Issue): Promise<Action> {
+		const labels = issue.labels;
+
+		// Handle stale investigating label (crashed previous run)
+		if (labels.includes(LABELS.INVESTIGATING)) {
+			console.log(`Issue #${issue.number} has stale '${LABELS.INVESTIGATING}' label, clearing it`);
+			await this.issues.removeLabel(issue.number, LABELS.INVESTIGATING);
+			// Treat as uninvestigated — re-investigate
+			return {type: 'investigate', issue};
+		}
+
+		// tasks-accepted: check if all tasks are done (reconcile) or implement next task
+		if (labels.includes(LABELS.TASKS_ACCEPTED)) {
+			const allDone = await this.allTasksCompletedOnBranch(issue.number);
+			if (allDone) {
+				return {type: 'reconcile', issue};
+			}
+
+			// Find an available task to implement
+			const implementAction = await this.findAvailableTask([issue]);
+			if (implementAction) {
+				return implementAction;
+			}
+
+			return {type: 'idle'};
+		}
+
+		// tasks-proposed: check if PR was already merged (tasks on main) → transition inline
+		if (labels.includes(LABELS.TASKS_PROPOSED)) {
+			if (this.tasks.hasRemainingTasks(issue.number)) {
+				// Tasks exist on main = investigate PR was merged
+				console.log(`Issue #${issue.number}: tasks PR merged, transitioning to tasks-accepted`);
+				await this.issues.removeLabel(issue.number, LABELS.TASKS_PROPOSED);
+				await this.issues.addLabel(issue.number, LABELS.TASKS_ACCEPTED);
+				// Find an available task to implement
+				const implementAction = await this.findAvailableTask([issue]);
+				if (implementAction) {
+					return implementAction;
+				}
+				return {type: 'idle'};
+			}
+
+			// PR not yet merged — auto-approve if auto-work is enabled
+			if (isAutoWorkEnabled(this.config, issue)) {
+				return {type: 'auto-approve', issue};
+			}
+
+			return {type: 'idle'};
+		}
+
+		// completed: nothing to do
+		if (labels.includes(LABELS.COMPLETED)) {
+			return {type: 'idle'};
+		}
+
+		// No whitesmith labels — investigate
+		return {type: 'investigate', issue};
 	}
 
 	/**
