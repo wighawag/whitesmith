@@ -330,13 +330,17 @@ on:
         default: '3'
         type: string
       provider:
-        description: 'AI provider (e.g. ${config.defaultProvider})'
+        description: 'AI provider (overrides default)'
         required: false
         type: string
       model:
-        description: 'AI model ID (e.g. ${config.defaultModel})'
+        description: 'AI model (overrides default)'
         required: false
         type: string
+
+env:
+  WHITESMITH_PROVIDER: ${config.defaultProvider}
+  WHITESMITH_MODEL: ${config.defaultModel}
 
 concurrency:
   group: whitesmith-loop
@@ -389,8 +393,8 @@ ${authSteps}
         env:
 ${envBlock}
         run: |
-          PROVIDER="\${{ inputs.provider || '${config.defaultProvider}' }}"
-          MODEL="\${{ inputs.model || '${config.defaultModel}' }}"
+          PROVIDER="\${{ inputs.provider || env.WHITESMITH_PROVIDER }}"
+          MODEL="\${{ inputs.model || env.WHITESMITH_MODEL }}"
           whitesmith run . \\
             --agent-cmd "pi" \\
             --provider "$PROVIDER" \\
@@ -411,6 +415,10 @@ name: whitesmith-comment
 on:
   issue_comment:
     types: [created]
+
+env:
+  WHITESMITH_PROVIDER: ${config.defaultProvider}
+  WHITESMITH_MODEL: ${config.defaultModel}
 
 concurrency:
   group: whitesmith-comment-\${{ github.event.issue.number }}
@@ -515,8 +523,8 @@ ${envBlock}
           whitesmith comment . \\
             --number "\${{ github.event.issue.number }}" \\
             --body-file .whitesmith-comment-body.txt \\
-            --provider "${config.defaultProvider}" \\
-            --model "${config.defaultModel}" \\
+            --provider "$WHITESMITH_PROVIDER" \\
+            --model "$WHITESMITH_MODEL" \\
             --post
 
       - name: React with checkmark on success
