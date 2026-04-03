@@ -642,6 +642,47 @@ ${skipWhitesmithCheck}
 `;
 }
 
+function generateIssueWorkflow(config: CIConfig): string {
+	const envBlock = generateTopLevelEnv(config);
+
+	return `\
+name: whitesmith-issue
+
+on:
+  issues:
+    types: [opened]
+
+env:
+${envBlock}
+
+concurrency:
+  group: whitesmith-issue-\${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: ./.github/actions/setup-whitesmith
+
+      - run: |
+          whitesmith run . \\
+            --issue "\${{ github.event.issue.number }}" \\
+            --provider "$WHITESMITH_PROVIDER" \\
+            --model "$WHITESMITH_MODEL" \\
+            --max-iterations 10
+`;
+}
+
 function generateReconcileWorkflow(): string {
 	return `\
 name: whitesmith-reconcile
@@ -966,6 +1007,10 @@ export async function installGitHubCI(
 		{
 			path: path.join(workflowsDir, 'whitesmith-comment.yml'),
 			content: generateCommentWorkflow(config),
+		},
+		{
+			path: path.join(workflowsDir, 'whitesmith-issue.yml'),
+			content: generateIssueWorkflow(config),
 		},
 		{
 			path: path.join(workflowsDir, 'whitesmith-reconcile.yml'),
