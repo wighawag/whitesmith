@@ -1,2 +1,4 @@
 dist/
 node_modules/
+.fake/
+ci-config.json

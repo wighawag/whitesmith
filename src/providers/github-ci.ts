@@ -6,7 +6,7 @@ import * as path from 'node:path';
 
 export type AuthMode = 'auth-json' | 'models-json';
 
-interface ProviderEntry {
+export interface ProviderEntry {
 	name: string;
 	baseUrl?: string;
 	api?: string;
@@ -14,6 +14,20 @@ interface ProviderEntry {
 	models: {id: string}[];
 	compat?: Record<string, boolean>;
 	builtin: boolean;
+}
+
+/**
+ * Serializable CI configuration.
+ * Can be saved to JSON with --export-config and loaded with --config.
+ * When --include-secrets is used, the `secrets` field maps env var names to
+ * their actual API key values. These are set via `gh secret set` on install.
+ */
+export interface CIConfigFile {
+	providers: ProviderEntry[];
+	defaultProvider: string;
+	defaultModel: string;
+	/** API key values keyed by env var name. Only present with --include-secrets. */
+	secrets?: Record<string, string>;
 }
 
 interface CIConfig {
@@ -180,12 +194,14 @@ async function promptDefaults(
 }
 
 /**
- * Prompt for API key values and set them as GitHub secrets.
- * Returns the list of secrets that were set.
+ * Set API key secrets on GitHub. If `knownSecrets` contains a value for an
+ * env var, it is used directly; otherwise the user is prompted interactively.
+ * Returns the list of secret names that were successfully set.
  */
-async function promptAndSetSecrets(
+async function setOrPromptSecrets(
 	ctx: GitHubCIContext,
 	providers: ProviderEntry[],
+	knownSecrets?: Record<string, string>,
 ): Promise<string[]> {
 	const setSecrets: string[] = [];
 	const seen = new Set<string>();
@@ -194,9 +210,12 @@ async function promptAndSetSecrets(
 		if (seen.has(p.apiKeyEnvVar)) continue;
 		seen.add(p.apiKeyEnvVar);
 
-		const apiKey = await password({
-			message: `Enter API key for ${p.name} (secret: ${p.apiKeyEnvVar}):`,
-		});
+		let apiKey = knownSecrets?.[p.apiKeyEnvVar];
+		if (!apiKey) {
+			apiKey = await password({
+				message: `Enter API key for ${p.name} (secret: ${p.apiKeyEnvVar}):`,
+			});
+		}
 
 		if (!apiKey) {
 			console.log(`  ⚠ Skipped ${p.apiKeyEnvVar} (empty)`);
@@ -252,72 +271,111 @@ function indent(text: string, spaces: number): string {
 		.join('\n');
 }
 
-function generateModelsJsonStep(config: CIConfig): string {
-	const modelsJson = buildModelsJson(config.providers);
-	const modelsJsonStr = JSON.stringify(modelsJson, null, 2);
-
-	return `\
-      - name: Configure pi models
-        run: |
-          mkdir -p ~/.pi/agent
-          cat > ~/.pi/agent/models.json << 'MODELS_EOF'
-${indent(modelsJsonStr, 10)}
-          MODELS_EOF`;
-}
-
-function generateAuthJsonSteps(): string {
-	return `\
-      - name: Configure pi auth
-        env:
-          PI_AUTH_JSON: \${{ secrets.PI_AUTH_JSON }}
-        run: |
-          if [ -z "$PI_AUTH_JSON" ]; then
-            echo "ERROR: PI_AUTH_JSON secret is not configured."
-            echo "Set it to the contents of ~/.pi/agent/auth.json"
-            exit 1
-          fi
-          mkdir -p ~/.pi/agent
-          echo "$PI_AUTH_JSON" > ~/.pi/agent/auth.json
-          chmod 600 ~/.pi/agent/auth.json
-
-      # Workaround for https://github.com/badlogic/pi-mono/issues/2743
-      - name: Refresh OAuth token
-        env:
-          GH_PAT: \${{ secrets.GH_PAT }}
-        run: node .github/scripts/refresh-oauth-token.mjs`;
-}
-
-function generateAuthSteps(config: CIConfig): string {
-	if (config.authMode === 'auth-json') {
-		return generateAuthJsonSteps();
-	}
-	return generateModelsJsonStep(config);
-}
-
-function generateRunEnvBlock(config: CIConfig): string {
-	const envs: Record<string, string> = {
-		GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}',
-	};
+/**
+ * Top-level env block shared by whitesmith.yml and whitesmith-comment.yml.
+ * Includes defaults, GH_TOKEN, and API key secrets.
+ */
+function generateTopLevelEnv(config: CIConfig): string {
+	const lines: string[] = [
+		`  WHITESMITH_PROVIDER: ${config.defaultProvider}`,
+		`  WHITESMITH_MODEL: ${config.defaultModel}`,
+		`  GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}`,
+	];
 
 	if (config.authMode === 'models-json') {
+		const seen = new Set<string>();
 		for (const p of config.providers) {
-			envs[p.apiKeyEnvVar] = `\${{ secrets.${p.apiKeyEnvVar} }}`;
+			if (seen.has(p.apiKeyEnvVar)) continue;
+			seen.add(p.apiKeyEnvVar);
+			lines.push(`  ${p.apiKeyEnvVar}: \${{ secrets.${p.apiKeyEnvVar} }}`);
 		}
 	}
 
-	return Object.entries(envs)
-		.map(([k, v]) => `          ${k}: ${v}`)
-		.join('\n');
+	return lines.join('\n');
+}
+
+/**
+ * Composite action: node setup, git config, npm cache, install, auth config.
+ * This is written to .github/actions/setup-whitesmith/action.yml so workflows
+ * can just do `uses: ./.github/actions/setup-whitesmith`.
+ */
+function generateSetupAction(config: CIConfig): string {
+	let authStep: string;
+
+	if (config.authMode === 'auth-json') {
+		authStep = `\
+    - name: Configure pi auth
+      shell: bash
+      run: |
+        if [ -z "$PI_AUTH_JSON" ]; then
+          echo "ERROR: PI_AUTH_JSON secret is not set" >&2; exit 1
+        fi
+        mkdir -p ~/.pi/agent
+        echo "$PI_AUTH_JSON" > ~/.pi/agent/auth.json
+        chmod 600 ~/.pi/agent/auth.json
+
+    # Workaround for https://github.com/badlogic/pi-mono/issues/2743
+    - name: Refresh OAuth token
+      shell: bash
+      run: node .github/scripts/refresh-oauth-token.mjs`;
+	} else {
+		const modelsJson = buildModelsJson(config.providers);
+		const modelsJsonStr = JSON.stringify(modelsJson, null, 2);
+
+		authStep = `\
+    - name: Configure pi models
+      shell: bash
+      run: |
+        mkdir -p ~/.pi/agent
+        cat > ~/.pi/agent/models.json << 'MODELS_EOF'
+${indent(modelsJsonStr, 8)}
+        MODELS_EOF`;
+	}
+
+	return `\
+name: Setup whitesmith
+description: Install Node.js, whitesmith, pi, and configure AI provider auth
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+
+    - name: Configure git
+      shell: bash
+      run: |
+        git config user.name "whitesmith[bot]"
+        git config user.email "whitesmith[bot]@users.noreply.github.com"
+
+    - name: Get npm global prefix
+      id: npm-prefix
+      shell: bash
+      run: echo "dir=$(npm prefix -g)" >> "$GITHUB_OUTPUT"
+
+    - name: Cache npm packages
+      id: npm-cache
+      uses: actions/cache@v4
+      with:
+        path: \${{ steps.npm-prefix.outputs.dir }}
+        key: whitesmith-\${{ runner.os }}-v1
+
+    - name: Install whitesmith and pi
+      if: steps.npm-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: npm install -g whitesmith @mariozechner/pi-coding-agent
+
+${authStep}
+`;
 }
 
 function generateMainWorkflow(config: CIConfig): string {
-	const authSteps = generateAuthSteps(config);
-	const envBlock = generateRunEnvBlock(config);
+	const envBlock = generateTopLevelEnv(config);
 
 	return `\
-# NOTE: This workflow requires the repo setting:
-#   Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"
-# Without this, PR creation will fail with a permissions error.
+# Requires: Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"
 name: whitesmith
 
 on:
@@ -328,19 +386,13 @@ on:
       max_iterations:
         description: 'Maximum iterations'
         default: '3'
-        type: string
       provider:
-        description: 'AI provider (overrides default)'
-        required: false
-        type: string
+        description: 'AI provider (overrides WHITESMITH_PROVIDER)'
       model:
-        description: 'AI model (overrides default)'
-        required: false
-        type: string
+        description: 'AI model (overrides WHITESMITH_MODEL)'
 
 env:
-  WHITESMITH_PROVIDER: ${config.defaultProvider}
-  WHITESMITH_MODEL: ${config.defaultModel}
+${envBlock}
 
 concurrency:
   group: whitesmith-loop
@@ -358,58 +410,23 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: \${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+      - uses: ./.github/actions/setup-whitesmith
 
-      - name: Configure git
-        run: |
-          git config user.name "whitesmith[bot]"
-          git config user.email "whitesmith[bot]@users.noreply.github.com"
-
-      - name: Get npm global prefix
-        id: npm-prefix
-        run: echo "dir=$(npm prefix -g)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache global npm packages
-        id: npm-cache
-        uses: actions/cache@v4
-        with:
-          path: \${{ steps.npm-prefix.outputs.dir }}
-          key: npm-global-\${{ runner.os }}-pi-v1
-
-      - name: Install whitesmith and pi
-        if: steps.npm-cache.outputs.cache-hit != 'true'
-        run: |
-          npm install -g whitesmith
-          npm install -g @mariozechner/pi-coding-agent
-
-${authSteps}
-
-      - name: Run whitesmith
-        env:
-${envBlock}
-        run: |
-          PROVIDER="\${{ inputs.provider || env.WHITESMITH_PROVIDER }}"
-          MODEL="\${{ inputs.model || env.WHITESMITH_MODEL }}"
+      - run: |
           whitesmith run . \\
             --agent-cmd "pi" \\
-            --provider "$PROVIDER" \\
-            --model "$MODEL" \\
+            --provider "\${{ inputs.provider || env.WHITESMITH_PROVIDER }}" \\
+            --model "\${{ inputs.model || env.WHITESMITH_MODEL }}" \\
             --max-iterations \${{ inputs.max_iterations || '3' }}
 `;
 }
 
 function generateCommentWorkflow(config: CIConfig): string {
-	const authSteps = generateAuthSteps(config);
-	const envBlock = generateRunEnvBlock(config);
+	const envBlock = generateTopLevelEnv(config);
 
 	return `\
-# NOTE: This workflow requires the repo setting:
-#   Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"
+# Requires: Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"
 name: whitesmith-comment
 
 on:
@@ -417,8 +434,7 @@ on:
     types: [created]
 
 env:
-  WHITESMITH_PROVIDER: ${config.defaultProvider}
-  WHITESMITH_MODEL: ${config.defaultModel}
+${envBlock}
 
 concurrency:
   group: whitesmith-comment-\${{ github.event.issue.number }}
@@ -435,91 +451,43 @@ jobs:
     outputs:
       should_run: \${{ steps.check.outputs.should_run }}
     steps:
-      - name: Check if should run
-        id: check
+      - id: check
         env:
-          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
           COMMENT_BODY: \${{ github.event.comment.body }}
         run: |
-          # Always run if comment contains /whitesmith
           if echo "$COMMENT_BODY" | grep -q '/whitesmith'; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
-            echo "Triggered by /whitesmith keyword"
             exit 0
           fi
-
-          # For PR comments, auto-trigger if the PR is on a whitesmith branch
           if [ -n "\${{ github.event.issue.pull_request.url }}" ]; then
             BRANCH=$(gh pr view \${{ github.event.issue.number }} \\
-              --repo \${{ github.repository }} \\
-              --json headRefName -q .headRefName)
-            echo "PR branch: $BRANCH"
+              --repo \${{ github.repository }} --json headRefName -q .headRefName)
             if echo "$BRANCH" | grep -qE '^(investigate|task)/'; then
               echo "should_run=true" >> "$GITHUB_OUTPUT"
-              echo "Triggered by comment on whitesmith PR branch"
               exit 0
             fi
           fi
-
           echo "should_run=false" >> "$GITHUB_OUTPUT"
-          echo "Skipping: not a /whitesmith command and not a whitesmith PR"
 
   run:
     needs: check
-    runs-on: ubuntu-latest
     if: needs.check.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
     steps:
-      - name: React with eyes to acknowledge
-        env:
-          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
-        run: |
+      - run: |
           gh api repos/\${{ github.repository }}/issues/comments/\${{ github.event.comment.id }}/reactions \\
             -f content=eyes
 
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: \${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+      - uses: ./.github/actions/setup-whitesmith
 
-      - name: Configure git
-        run: |
-          git config user.name "whitesmith[bot]"
-          git config user.email "whitesmith[bot]@users.noreply.github.com"
-
-      - name: Get npm global prefix
-        id: npm-prefix
-        run: echo "dir=$(npm prefix -g)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache global npm packages
-        id: npm-cache
-        uses: actions/cache@v4
-        with:
-          path: \${{ steps.npm-prefix.outputs.dir }}
-          key: npm-global-\${{ runner.os }}-pi-v1
-
-      - name: Install whitesmith and pi
-        if: steps.npm-cache.outputs.cache-hit != 'true'
-        run: |
-          npm install -g whitesmith
-          npm install -g @mariozechner/pi-coding-agent
-
-${authSteps}
-
-      - name: Save comment body to file
-        env:
+      - env:
           COMMENT_BODY: \${{ github.event.comment.body }}
         run: |
           printf '%s' "$COMMENT_BODY" > .whitesmith-comment-body.txt
-
-      - name: Run whitesmith comment
-        env:
-${envBlock}
-        run: |
           whitesmith comment . \\
             --number "\${{ github.event.issue.number }}" \\
             --body-file .whitesmith-comment-body.txt \\
@@ -527,24 +495,17 @@ ${envBlock}
             --model "$WHITESMITH_MODEL" \\
             --post
 
-      - name: React with checkmark on success
-        if: success()
-        env:
-          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+      - if: success()
         run: |
           gh api repos/\${{ github.repository }}/issues/comments/\${{ github.event.comment.id }}/reactions \\
             -f content="+1"
 
-      - name: React with X and comment on failure
-        if: failure()
-        env:
-          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+      - if: failure()
         run: |
           gh api repos/\${{ github.repository }}/issues/comments/\${{ github.event.comment.id }}/reactions \\
             -f content="-1"
-          gh issue comment \${{ github.event.issue.number }} \\
-            --repo \${{ github.repository }} \\
-            --body "❌ Agent run failed for [this comment](\${{ github.event.comment.html_url }}). Check the [workflow run](\${{ github.server_url }}/\${{ github.repository }}/actions/runs/\${{ github.run_id }}) for details."
+          gh issue comment \${{ github.event.issue.number }} --repo \${{ github.repository }} \\
+            --body "❌ Agent run failed. See [workflow run](\${{ github.server_url }}/\${{ github.repository }}/actions/runs/\${{ github.run_id }})."
 `;
 }
 
@@ -556,6 +517,9 @@ on:
   pull_request:
     types: [closed]
     branches: [main]
+
+env:
+  GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
 
 permissions:
   contents: read
@@ -569,30 +533,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+      - uses: ./.github/actions/setup-whitesmith
 
-      - name: Get npm global prefix
-        id: npm-prefix
-        run: echo "dir=$(npm prefix -g)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache global npm packages
-        id: npm-cache
-        uses: actions/cache@v4
-        with:
-          path: \${{ steps.npm-prefix.outputs.dir }}
-          key: npm-global-\${{ runner.os }}-whitesmith-v1
-
-      - name: Install whitesmith
-        if: steps.npm-cache.outputs.cache-hit != 'true'
-        run: npm install -g whitesmith
-
-      - name: Reconcile
-        env:
-          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
-        run: whitesmith reconcile .
+      - run: whitesmith reconcile .
 `;
 }
 
@@ -698,6 +641,32 @@ if (repo && token) {
 export interface InstallCIOptions {
 	authMode: AuthMode;
 	fake?: boolean;
+	/** Path to a JSON config file — skips interactive prompts. */
+	configFile?: string;
+	/** Write the provider config as JSON to this file path instead of generating workflows. */
+	exportConfig?: string;
+	/** When used with --export-config, prompt for API keys and include them in the output. */
+	includeSecrets?: boolean;
+}
+
+/**
+ * Load config from a JSON file, skipping interactive prompts.
+ */
+function loadConfigFile(filePath: string): CIConfigFile {
+	const raw = fs.readFileSync(filePath, 'utf-8');
+	const data = JSON.parse(raw) as CIConfigFile;
+
+	if (!data.providers || !Array.isArray(data.providers) || data.providers.length === 0) {
+		throw new Error(`Config file must contain a non-empty "providers" array`);
+	}
+	if (!data.defaultProvider) {
+		throw new Error(`Config file must contain "defaultProvider"`);
+	}
+	if (!data.defaultModel) {
+		throw new Error(`Config file must contain "defaultModel"`);
+	}
+
+	return data;
 }
 
 export async function installGitHubCI(
@@ -705,33 +674,42 @@ export async function installGitHubCI(
 	options: InstallCIOptions,
 ): Promise<void> {
 	const {authMode} = options;
+	const fake = options.fake ?? false;
+	const exportConfig = options.exportConfig ?? undefined;
 
 	console.log('=== whitesmith install-ci (GitHub) ===\n');
 	console.log(`Auth mode: ${authMode}\n`);
 
 	let repo = ctx.repo;
 
-	if (!repo && authMode === 'models-json' && ctx.ghAvailable) {
+	if (!exportConfig && !fake && !repo && authMode === 'models-json' && ctx.ghAvailable) {
 		repo = await input({
 			message: 'GitHub repository (owner/repo) — needed to set secrets:',
 		});
 		ctx.repo = repo;
 	}
 
-	let providers: ProviderEntry[] = [];
+	let providers: ProviderEntry[];
 	let defaultProvider: string;
 	let defaultModel: string;
+	let loadedSecrets: Record<string, string> | undefined;
 
-	if (authMode === 'models-json') {
-		// Configure providers interactively
+	if (options.configFile) {
+		// Load from file — no prompts
+		const loaded = loadConfigFile(options.configFile);
+		providers = loaded.providers;
+		defaultProvider = loaded.defaultProvider;
+		defaultModel = loaded.defaultModel;
+		loadedSecrets = loaded.secrets;
+	} else if (authMode === 'models-json') {
+		// Interactive prompts
 		providers = await promptProviders();
-
-		// Pick defaults
 		const defaults = await promptDefaults(providers);
 		defaultProvider = defaults.provider;
 		defaultModel = defaults.model;
 	} else {
 		// auth.json mode — still need provider/model for whitesmith commands
+		providers = [];
 		defaultProvider = await input({
 			message: 'Default AI provider:',
 			default: 'anthropic',
@@ -740,6 +718,31 @@ export async function installGitHubCI(
 			message: 'Default AI model:',
 			default: 'claude-sonnet-4-20250514',
 		});
+	}
+
+	// ── Export config mode — write JSON to stdout and exit ───────────────
+
+	if (exportConfig) {
+		const configFile: CIConfigFile = {providers, defaultProvider, defaultModel};
+		if (options.includeSecrets && providers.length > 0) {
+			const secrets: Record<string, string> = {};
+			const seen = new Set<string>();
+			for (const p of providers) {
+				if (seen.has(p.apiKeyEnvVar)) continue;
+				seen.add(p.apiKeyEnvVar);
+				const key = await password({
+					message: `Enter API key for ${p.name} (${p.apiKeyEnvVar}):`,
+				});
+				if (key) secrets[p.apiKeyEnvVar] = key;
+			}
+			if (Object.keys(secrets).length > 0) {
+				configFile.secrets = secrets;
+			}
+		}
+		const json = JSON.stringify(configFile, null, 2) + '\n';
+		fs.writeFileSync(exportConfig, json, 'utf-8');
+		console.log(`\n✅ Config written to ${exportConfig}`);
+		return;
 	}
 
 	const config: CIConfig = {
@@ -751,15 +754,15 @@ export async function installGitHubCI(
 
 	// ── Set GitHub secrets via gh CLI ─────────────────────────────────────
 
-	const fake = options.fake ?? false;
-
 	if (!fake && authMode === 'models-json' && repo) {
 		if (!ctx.ghAvailable) {
 			console.log('\n⚠ GitHub CLI (gh) is not available or not authenticated.');
 			console.log('  You will need to set the following secrets manually.\n');
 		} else {
+			// If config file included secrets, set them directly without prompting
+			const configSecrets = options.configFile ? loadedSecrets : undefined;
 			console.log('\n🔑 Setting API key secrets on GitHub...\n');
-			const setSecrets = await promptAndSetSecrets(ctx, providers);
+			const setSecrets = await setOrPromptSecrets(ctx, providers, configSecrets);
 
 			const allEnvVars = [...new Set(providers.map((p) => p.apiKeyEnvVar))];
 			const missing = allEnvVars.filter((v) => !setSecrets.includes(v));
@@ -777,11 +780,17 @@ export async function installGitHubCI(
 	// ── Generate and write workflow files ─────────────────────────────────
 
 	const outputBase = fake ? '.fake' : '.github';
-	const githubDir = path.join(ctx.workDir, outputBase);
-	const workflowsDir = path.join(githubDir, 'workflows');
+	const baseDir = path.join(ctx.workDir, outputBase);
+	const workflowsDir = path.join(baseDir, 'workflows');
+	const actionsDir = path.join(baseDir, 'actions', 'setup-whitesmith');
 	fs.mkdirSync(workflowsDir, {recursive: true});
+	fs.mkdirSync(actionsDir, {recursive: true});
 
 	const files: {path: string; content: string}[] = [
+		{
+			path: path.join(actionsDir, 'action.yml'),
+			content: generateSetupAction(config),
+		},
 		{
 			path: path.join(workflowsDir, 'whitesmith.yml'),
 			content: generateMainWorkflow(config),
@@ -797,7 +806,7 @@ export async function installGitHubCI(
 	];
 
 	if (authMode === 'auth-json') {
-		const scriptsDir = path.join(githubDir, 'scripts');
+		const scriptsDir = path.join(baseDir, 'scripts');
 		fs.mkdirSync(scriptsDir, {recursive: true});
 		files.push({
 			path: path.join(scriptsDir, 'refresh-oauth-token.mjs'),

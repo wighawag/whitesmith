@@ -258,10 +258,10 @@ export function buildCli(): Command {
 			'Use pi auth.json instead of models.json (requires PI_AUTH_JSON and GH_PAT secrets)',
 		)
 		.option('--repo <owner/repo>', 'GitHub repo (auto-detected if omitted)')
-		.option(
-			'--fake',
-			'Write workflows to .fake/workflows/ instead of .github/workflows/ (for testing)',
-		)
+		.option('--fake', 'Write workflows to .fake/ instead of .github/ (for testing/comparison)')
+		.option('--config <path>', 'Load provider config from a JSON file (skip interactive prompts)')
+		.option('--export-config <path>', 'Write the provider config as JSON to a file instead of generating workflows')
+		.option('--include-secrets', 'With --export-config, prompt for API keys and include them in the JSON output')
 		.action(async (workDir: string, opts) => {
 			const resolvedDir = path.resolve(workDir);
 			if (!fs.existsSync(resolvedDir)) {
@@ -273,7 +273,13 @@ export function buildCli(): Command {
 
 			try {
 				const provider = new GitHubProvider(resolvedDir, opts.repo);
-				await provider.installCI({authMode, fake: opts.fake ?? false});
+				await provider.installCI({
+					authMode,
+					fake: opts.fake ?? false,
+					configFile: opts.config,
+					exportConfig: opts.exportConfig,
+					includeSecrets: opts.includeSecrets ?? false,
+				});
 			} catch (error) {
 				console.error('ERROR:', error instanceof Error ? error.message : error);
 				process.exit(1);
