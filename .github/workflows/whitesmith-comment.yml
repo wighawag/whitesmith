@@ -1,10 +1,15 @@
-# NOTE: This workflow requires the repo setting:
-#   Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"
+# Requires: Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"
 name: whitesmith-comment
 
 on:
   issue_comment:
     types: [created]
+
+env:
+  WHITESMITH_PROVIDER: anthropic
+  WHITESMITH_MODEL: claude-opus-4-6
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
 
 concurrency:
   group: whitesmith-comment-${{ github.event.issue.number }}
@@ -21,158 +26,58 @@ jobs:
     outputs:
       should_run: ${{ steps.check.outputs.should_run }}
     steps:
-      - name: Check if should run
-        id: check
+      - id: check
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
-          # Always run if comment contains /whitesmith
           if echo "$COMMENT_BODY" | grep -q '/whitesmith'; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
-            echo "Triggered by /whitesmith keyword"
             exit 0
           fi
-
-          # For PR comments, auto-trigger if the PR is on a whitesmith branch
           if [ -n "${{ github.event.issue.pull_request.url }}" ]; then
             BRANCH=$(gh pr view ${{ github.event.issue.number }} \
-              --repo ${{ github.repository }} \
-              --json headRefName -q .headRefName)
-            echo "PR branch: $BRANCH"
+              --repo ${{ github.repository }} --json headRefName -q .headRefName)
             if echo "$BRANCH" | grep -qE '^(investigate|task)/'; then
               echo "should_run=true" >> "$GITHUB_OUTPUT"
-              echo "Triggered by comment on whitesmith PR branch"
               exit 0
             fi
           fi
-
           echo "should_run=false" >> "$GITHUB_OUTPUT"
-          echo "Skipping: not a /whitesmith command and not a whitesmith PR"
 
   run:
     needs: check
-    runs-on: ubuntu-latest
     if: needs.check.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
     steps:
-      - name: React with eyes to acknowledge
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
+      - run: |
           gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
             -f content=eyes
 
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+      - uses: ./.github/actions/setup-whitesmith
 
-      - name: Configure git
-        run: |
-          git config user.name "whitesmith[bot]"
-          git config user.email "whitesmith[bot]@users.noreply.github.com"
-
-      - name: Get npm global prefix
-        id: npm-prefix
-        run: echo "dir=$(npm prefix -g)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache global npm packages
-        id: npm-cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.npm-prefix.outputs.dir }}
-          key: npm-global-${{ runner.os }}-${{ github.repository == 'wighawag/whitesmith' && 'source' || 'registry' }}-pi-v1
-
-      - name: Setup pnpm
-        if: github.repository == 'wighawag/whitesmith'
-        uses: pnpm/action-setup@v4
-
-      - name: Install or build whitesmith
-        if: steps.npm-cache.outputs.cache-hit != 'true'
-        run: |
-          if [ "${{ github.repository }}" = "wighawag/whitesmith" ]; then
-            echo "Running in whitesmith repo — building from source"
-            pnpm install
-            pnpm run build
-            pnpm link --global
-          else
-            npm install -g whitesmith
-          fi
-
-      - name: Rebuild whitesmith from source (cache hit)
-        if: steps.npm-cache.outputs.cache-hit == 'true' && github.repository == 'wighawag/whitesmith'
-        run: |
-          pnpm install
-          pnpm run build
-          pnpm link --global
-
-      - name: Install pi
-        if: steps.npm-cache.outputs.cache-hit != 'true'
-        run: npm install -g @mariozechner/pi-coding-agent
-
-      - name: Configure pi auth
-        env:
-          PI_AUTH_JSON: ${{ secrets.PI_AUTH_JSON }}
-        run: |
-          if [ -z "$PI_AUTH_JSON" ]; then
-            echo "ERROR: PI_AUTH_JSON secret is not configured."
-            echo "Set it to the contents of ~/.pi/agent/auth.json"
-            exit 1
-          fi
-          mkdir -p ~/.pi/agent
-          echo "$PI_AUTH_JSON" > ~/.pi/agent/auth.json
-          chmod 600 ~/.pi/agent/auth.json
-          echo "Auth providers: $(node -e "process.stdout.write(Object.keys(JSON.parse(require('fs').readFileSync(process.env.HOME+'/.pi/agent/auth.json','utf-8'))).join(', '))")"
-
-      # Workaround for https://github.com/badlogic/pi-mono/issues/2743
-      - name: Refresh OAuth token
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-        run: node .github/scripts/refresh-oauth-token.mjs
-
-      - name: Save comment body to file
-        env:
+      - env:
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
           printf '%s' "$COMMENT_BODY" > .whitesmith-comment-body.txt
-
-      - name: Run whitesmith comment
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          PROVIDER="${{ vars.WHITESMITH_PROVIDER }}"
-          MODEL="${{ vars.WHITESMITH_MODEL }}"
-          if [ -z "$PROVIDER" ] || [ -z "$MODEL" ]; then
-            echo "ERROR: WHITESMITH_PROVIDER and WHITESMITH_MODEL repository variables are required."
-            exit 1
-          fi
           whitesmith comment . \
             --number "${{ github.event.issue.number }}" \
             --body-file .whitesmith-comment-body.txt \
-            --provider "$PROVIDER" \
-            --model "$MODEL" \
+            --provider "$WHITESMITH_PROVIDER" \
+            --model "$WHITESMITH_MODEL" \
             --post
 
-      - name: React with checkmark on success
-        if: success()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - if: success()
         run: |
           gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
             -f content="+1"
 
-      - name: React with X and comment on failure
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - if: failure()
         run: |
           gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
             -f content="-1"
-          gh issue comment ${{ github.event.issue.number }} \
-            --repo ${{ github.repository }} \
-            --body "❌ Agent run failed for [this comment](${{ github.event.comment.html_url }}). Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
+          gh issue comment ${{ github.event.issue.number }} --repo ${{ github.repository }} \
+            --body "❌ Agent run failed. See [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."

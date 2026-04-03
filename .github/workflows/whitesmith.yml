@@ -1,6 +1,4 @@
-# NOTE: This workflow requires the repo setting:
-#   Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"
-# Without this, PR creation will fail with a permissions error.
+# Requires: Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"
 name: whitesmith
 
 on:
@@ -11,15 +9,16 @@ on:
       max_iterations:
         description: 'Maximum iterations'
         default: '3'
-        type: string
       provider:
-        description: 'AI provider (e.g. anthropic, openai)'
-        required: true
-        type: string
+        description: 'AI provider (overrides WHITESMITH_PROVIDER)'
       model:
-        description: 'AI model ID (e.g. claude-opus-4-6)'
-        required: true
-        type: string
+        description: 'AI model (overrides WHITESMITH_MODEL)'
+
+env:
+  WHITESMITH_PROVIDER: anthropic
+  WHITESMITH_MODEL: claude-opus-4-6
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
 
 concurrency:
   group: whitesmith-loop
@@ -37,89 +36,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+      - uses: ./.github/actions/setup-whitesmith
 
-      - name: Configure git
-        run: |
-          git config user.name "whitesmith[bot]"
-          git config user.email "whitesmith[bot]@users.noreply.github.com"
-
-      - name: Get npm global prefix
-        id: npm-prefix
-        run: echo "dir=$(npm prefix -g)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache global npm packages
-        id: npm-cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.npm-prefix.outputs.dir }}
-          key: npm-global-${{ runner.os }}-${{ github.repository == 'wighawag/whitesmith' && 'source' || 'registry' }}-pi-v1
-
-      - name: Setup pnpm
-        if: github.repository == 'wighawag/whitesmith'
-        uses: pnpm/action-setup@v4
-
-      - name: Install or build whitesmith
-        if: steps.npm-cache.outputs.cache-hit != 'true'
-        run: |
-          if [ "${{ github.repository }}" = "wighawag/whitesmith" ]; then
-            echo "Running in whitesmith repo — building from source"
-            pnpm install
-            pnpm run build
-            pnpm link --global
-          else
-            npm install -g whitesmith
-          fi
-
-      - name: Rebuild whitesmith from source (cache hit)
-        if: steps.npm-cache.outputs.cache-hit == 'true' && github.repository == 'wighawag/whitesmith'
-        run: |
-          pnpm install
-          pnpm run build
-          pnpm link --global
-
-      - name: Install pi
-        if: steps.npm-cache.outputs.cache-hit != 'true'
-        run: npm install -g @mariozechner/pi-coding-agent
-
-      - name: Configure pi auth
-        env:
-          PI_AUTH_JSON: ${{ secrets.PI_AUTH_JSON }}
-        run: |
-          if [ -z "$PI_AUTH_JSON" ]; then
-            echo "ERROR: PI_AUTH_JSON secret is not configured."
-            echo "Set it to the contents of ~/.pi/agent/auth.json"
-            exit 1
-          fi
-          mkdir -p ~/.pi/agent
-          echo "$PI_AUTH_JSON" > ~/.pi/agent/auth.json
-          chmod 600 ~/.pi/agent/auth.json
-          echo "Auth providers: $(node -e "process.stdout.write(Object.keys(JSON.parse(require('fs').readFileSync(process.env.HOME+'/.pi/agent/auth.json','utf-8'))).join(', '))")"
-
-      # Workaround for https://github.com/badlogic/pi-mono/issues/2743
-      - name: Refresh OAuth token
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-        run: node .github/scripts/refresh-oauth-token.mjs
-
-      - name: Run whitesmith
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          PROVIDER="${{ inputs.provider || vars.WHITESMITH_PROVIDER }}"
-          MODEL="${{ inputs.model || vars.WHITESMITH_MODEL }}"
-          if [ -z "$PROVIDER" ] || [ -z "$MODEL" ]; then
-            echo "ERROR: --provider and --model are required."
-            echo "For scheduled runs, set WHITESMITH_PROVIDER and WHITESMITH_MODEL repository variables."
-            exit 1
-          fi
+      - run: |
           whitesmith run . \
             --agent-cmd "pi" \
-            --provider "$PROVIDER" \
-            --model "$MODEL" \
+            --provider "${{ inputs.provider || env.WHITESMITH_PROVIDER }}" \
+            --model "${{ inputs.model || env.WHITESMITH_MODEL }}" \
             --max-iterations ${{ inputs.max_iterations || '3' }}
