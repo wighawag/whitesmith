@@ -5,6 +5,7 @@ import type {AgentHarness} from './harnesses/agent-harness.js';
 import {TaskManager} from './task-manager.js';
 import {GitManager} from './git.js';
 import {buildInvestigatePrompt, buildImplementPrompt} from './prompts.js';
+import {isAutoWorkEnabled} from './auto-work.js';
 
 /**
  * Main orchestrator for whitesmith.
@@ -73,6 +74,9 @@ export class Orchestrator {
 					case 'reconcile':
 						console.log(`Would reconcile issue #${action.issue.number}: ${action.issue.title}`);
 						break;
+					case 'auto-approve':
+						console.log(`Would auto-approve task PR for issue #${action.issue.number}: ${action.issue.title}`);
+						break;
 					case 'investigate':
 						console.log(`Would investigate issue #${action.issue.number}: ${action.issue.title}`);
 						break;
@@ -89,6 +93,9 @@ export class Orchestrator {
 			switch (action.type) {
 				case 'reconcile':
 					await this.reconcile(action.issue);
+					break;
+				case 'auto-approve':
+					await this.autoApprove(action.issue);
 					break;
 				case 'investigate':
 					await this.investigate(action.issue);
@@ -138,13 +145,21 @@ export class Orchestrator {
 			}
 		}
 
-		// Priority 2: Implement — find an available task
+		// Priority 2: Auto-approve — merge task PRs for issues with auto-work enabled
+		const proposedIssues = await this.issues.listIssues({labels: [LABELS.TASKS_PROPOSED]});
+		for (const issue of proposedIssues) {
+			if (isAutoWorkEnabled(this.config, issue)) {
+				return {type: 'auto-approve' as const, issue};
+			}
+		}
+
+		// Priority 3: Implement — find an available task
 		const implementAction = await this.findAvailableTask(acceptedIssues);
 		if (implementAction) {
 			return implementAction;
 		}
 
-		// Priority 3: Investigate — find a new issue (no whitesmith labels)
+		// Priority 4: Investigate — find a new issue (no whitesmith labels)
 		const allDevPulseLabels = Object.values(LABELS);
 		const newIssues = await this.issues.listIssues({noLabels: allDevPulseLabels});
 		if (newIssues.length > 0) {
@@ -245,6 +260,33 @@ export class Orchestrator {
 		await this.issues.closeIssue(issue.number);
 
 		console.log(`Issue #${issue.number} closed.`);
+	}
+
+	/**
+	 * Phase 1.5: Auto-approve — merge the task-proposal PR when auto-work is enabled
+	 */
+	private async autoApprove(issue: Issue): Promise<void> {
+		console.log(`Auto-approving task PR for issue #${issue.number}: ${issue.title}`);
+
+		const branch = `investigate/${issue.number}`;
+		const pr = await this.issues.getPRForBranch(branch);
+
+		if (!pr || pr.state !== 'open') {
+			console.log(`No open PR found for branch '${branch}', skipping auto-approve`);
+			return;
+		}
+
+		await this.issues.mergePR(pr.number);
+		console.log(`Merged PR #${pr.number}: ${pr.url}`);
+
+		await this.issues.removeLabel(issue.number, LABELS.TASKS_PROPOSED);
+		await this.issues.addLabel(issue.number, LABELS.TASKS_ACCEPTED);
+		await this.issues.comment(
+			issue.number,
+			`🤖 Task PR #${pr.number} has been auto-approved and merged. Tasks are now on \`main\`.`,
+		);
+
+		console.log(`Issue #${issue.number} transitioned to tasks-accepted.`);
 	}
 
 	/**

@@ -428,6 +428,176 @@ describe('Orchestrator', () => {
 		});
 	});
 
+	describe('auto-approve', () => {
+		it('auto-approves task PR when auto-work is enabled via config and issue is tasks-proposed', async () => {
+			const issue = makeIssue({number: 50, title: 'Auto issue', labels: [LABELS.TASKS_PROPOSED]});
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [];
+						if (opts?.labels?.includes(LABELS.TASKS_PROPOSED)) return [issue];
+						return [];
+					}),
+				getPRForBranch: vi.fn().mockResolvedValue({
+					state: 'open',
+					url: 'https://github.com/test/repo/pull/55',
+					number: 55,
+				}),
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir, {autoWork: true});
+
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			expect(issues.mergePR).toHaveBeenCalledWith(55);
+			expect(issues.removeLabel).toHaveBeenCalledWith(50, LABELS.TASKS_PROPOSED);
+			expect(issues.addLabel).toHaveBeenCalledWith(50, LABELS.TASKS_ACCEPTED);
+			expect(issues.comment).toHaveBeenCalledWith(50, expect.stringContaining('auto-approved'));
+			expect(agent.run).not.toHaveBeenCalled();
+		});
+
+		it('auto-approves task PR when issue has auto-work label', async () => {
+			const issue = makeIssue({number: 51, title: 'Labeled auto', labels: [LABELS.TASKS_PROPOSED, LABELS.AUTO_WORK]});
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [];
+						if (opts?.labels?.includes(LABELS.TASKS_PROPOSED)) return [issue];
+						return [];
+					}),
+				getPRForBranch: vi.fn().mockResolvedValue({
+					state: 'open',
+					url: 'https://github.com/test/repo/pull/56',
+					number: 56,
+				}),
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir);
+
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			expect(issues.mergePR).toHaveBeenCalledWith(56);
+			expect(issues.removeLabel).toHaveBeenCalledWith(51, LABELS.TASKS_PROPOSED);
+			expect(issues.addLabel).toHaveBeenCalledWith(51, LABELS.TASKS_ACCEPTED);
+		});
+
+		it('does NOT auto-approve when auto-work is disabled', async () => {
+			const issue = makeIssue({number: 52, title: 'No auto', labels: [LABELS.TASKS_PROPOSED]});
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [];
+						if (opts?.labels?.includes(LABELS.TASKS_PROPOSED)) return [issue];
+						if (opts?.noLabels) return [];
+						return [];
+					}),
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir);
+
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			expect(issues.mergePR).not.toHaveBeenCalled();
+		});
+
+		it('skips auto-approve when no open PR exists for the branch', async () => {
+			const issue = makeIssue({number: 53, title: 'No PR', labels: [LABELS.TASKS_PROPOSED]});
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [];
+						if (opts?.labels?.includes(LABELS.TASKS_PROPOSED)) return [issue];
+						if (opts?.noLabels) return [];
+						return [];
+					}),
+				getPRForBranch: vi.fn().mockResolvedValue(null),
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir, {autoWork: true});
+
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			expect(issues.mergePR).not.toHaveBeenCalled();
+			// Should not transition labels either
+			expect(issues.addLabel).not.toHaveBeenCalled();
+		});
+
+		it('prints dry-run message for auto-approve', async () => {
+			const issue = makeIssue({number: 54, title: 'Dry run auto', labels: [LABELS.TASKS_PROPOSED]});
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [];
+						if (opts?.labels?.includes(LABELS.TASKS_PROPOSED)) return [issue];
+						return [];
+					}),
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir, {autoWork: true, dryRun: true});
+
+			const consoleSpy = vi.spyOn(console, 'log');
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			expect(consoleSpy).toHaveBeenCalledWith(
+				expect.stringContaining('Would auto-approve task PR for issue #54'),
+			);
+			expect(issues.mergePR).not.toHaveBeenCalled();
+			consoleSpy.mockRestore();
+		});
+
+		it('auto-approve takes priority over implement', async () => {
+			const proposedIssue = makeIssue({number: 55, title: 'Proposed', labels: [LABELS.TASKS_PROPOSED]});
+			const acceptedIssue = makeIssue({number: 56, title: 'Accepted'});
+
+			writeTaskFile(tmpDir, 56, 1, 'pending');
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [acceptedIssue];
+						if (opts?.labels?.includes(LABELS.TASKS_PROPOSED)) return [proposedIssue];
+						return [];
+					}),
+				getPRForBranch: vi.fn().mockResolvedValue({
+					state: 'open',
+					url: 'https://github.com/test/repo/pull/60',
+					number: 60,
+				}),
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir, {autoWork: true});
+
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Should auto-approve, not implement
+			expect(issues.mergePR).toHaveBeenCalledWith(60);
+			expect(agent.run).not.toHaveBeenCalled();
+		});
+	});
+
 	describe('priority ordering', () => {
 		it('reconcile takes priority over implement', async () => {
 			const completedIssue = makeIssue({number: 1, title: 'Done'});

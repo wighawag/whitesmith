@@ -93,6 +93,7 @@ export interface DevPulseConfig {
  */
 export type Action =
 	| {type: 'reconcile'; issue: Issue}
+	| {type: 'auto-approve'; issue: Issue}
 	| {type: 'investigate'; issue: Issue}
 	| {type: 'implement'; task: Task; issue: Issue}
 	| {type: 'idle'};
