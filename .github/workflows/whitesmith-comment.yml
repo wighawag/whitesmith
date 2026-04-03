@@ -129,8 +129,16 @@ jobs:
           chmod 600 ~/.pi/agent/auth.json
           echo "Auth providers: $(node -e "process.stdout.write(Object.keys(JSON.parse(require('fs').readFileSync(process.env.HOME+'/.pi/agent/auth.json','utf-8'))).join(', '))")"
 
+      - name: Restore cached OAuth token
+        uses: actions/cache@v4
+        with:
+          path: .pi-auth-cache
+          key: pi-oauth-${{ github.repository }}
+
       # Workaround for https://github.com/badlogic/pi-mono/issues/2743
       - name: Refresh OAuth token
+        env:
+          PI_AUTH_CACHE_PATH: .pi-auth-cache/auth.json
         run: node .github/scripts/refresh-oauth-token.mjs
 
       - name: Save comment body to file
