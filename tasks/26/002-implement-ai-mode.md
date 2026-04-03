@@ -12,25 +12,23 @@ Implement the `ai` auto-work mode that uses an LLM to analyze the issue content 
 ## Acceptance Criteria
 
 - When `autoWorkMode` is `ai` and trigger conditions are not met, the system calls an LLM to decide
-- The LLM call uses `autoWorkModel` if set, otherwise falls back to the main `model` from config
+- The LLM call uses the agent harness (i.e. `pi --print --no-tools --no-session`) with `autoWorkModel` if set, otherwise falls back to the main `model` from config
 - The prompt sent to the LLM includes the issue title, body, and asks for a yes/no decision on whether to auto-work
 - The LLM response is parsed to extract a boolean decision
-- `isAutoWorkEnabled()` becomes async (returns `Promise<boolean>`) to support the LLM call
-- All callers of `isAutoWorkEnabled()` are updated for the async signature
+- `isAutoWorkEnabled()` is already async from task 001; this task adds the actual AI call logic for the `ai` mode path
 - Tests cover the `ai` mode: triggered short-circuit, AI says yes, AI says no, AI call failure (defaults to false)
 
 ## Implementation Notes
 
 ### Approach
-- Make `isAutoWorkEnabled()` async in `src/auto-work.ts`
-- For the AI call, use the agent harness or create a lightweight LLM call utility. Look at how the codebase already calls models — likely through the agent harness. If no direct model call exists, a simple approach is to use the agent harness with a prompt that asks for a yes/no answer, or shell out to a CLI tool.
-- A simpler approach: add a function that runs a quick prompt through the configured provider/model. This could use the agent command (e.g., `pi`) with a simple prompt, or use a direct API call if the codebase supports it.
+- `isAutoWorkEnabled()` is already async from task 001. This task adds the AI decision logic for the `ai` mode path.
+- Use the agent harness (`PiHarness`) to make the LLM call. Specifically, use `pi --print --no-tools --no-session` with the configured provider and model (or `autoWorkModel` if set). This is consistent with how the codebase already calls LLMs (see `PiHarness.validate()` which uses a similar `--print --no-tools --no-session` pattern for a quick single-shot call).
+- `isAutoWorkEnabled()` needs access to the agent harness config (agentCmd, provider, model/autoWorkModel). Pass the relevant config or the harness itself.
 - The prompt should be something like: "Given this GitHub issue, should an AI agent work on it immediately without human review? Answer YES or NO. Issue: [title] [body]"
-- Update `src/orchestrator.ts` `decideAction()` where `isAutoWorkEnabled` is called — add `await`
-- Update `test/auto-work.test.ts` with new async test cases, mocking the LLM call
+- Parse the LLM response: look for YES/NO. On failure or ambiguous response, default to `false` (don't auto-work).
+- Update `test/auto-work.test.ts` with new async test cases, mocking the LLM call (mock `execSync` or extract the LLM call into a mockable function)
 
 ### Files to modify
-- `src/auto-work.ts`: Make async, add AI decision logic
-- `src/orchestrator.ts`: Await the now-async `isAutoWorkEnabled()`
-- `test/auto-work.test.ts`: Add tests for AI mode
-- Possibly `src/types.ts` if additional config fields are needed
+- `src/auto-work.ts`: Add AI decision logic (LLM call via agent harness command)
+- `src/types.ts`: Possibly add `agentCmd` to the fields passed to `isAutoWorkEnabled` if not already available
+- `test/auto-work.test.ts`: Add tests for AI mode with mocked LLM calls
