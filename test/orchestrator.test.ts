@@ -599,6 +599,32 @@ describe('Orchestrator', () => {
 			);
 		});
 
+		it('treats implementation as incomplete when agent does not delete task file', async () => {
+			const issue = makeIssue({number: 20, title: 'Lazy agent'});
+			writeTaskFile(tmpDir, 20, 1, 'do-thing');
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [issue];
+						return [];
+					}),
+			});
+
+			// Agent exits successfully but does NOT delete the task file
+			const agent = createMockAgent({
+				run: vi.fn().mockResolvedValue({output: 'done', exitCode: 0}),
+			});
+
+			const config = createConfig(tmpDir, {noPush: false});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Should NOT push or create PR since task was not completed
+			expect(issues.createPR).not.toHaveBeenCalled();
+		});
+
 		it('does not create PR when tasks remain after implementation', async () => {
 			const issue = makeIssue({number: 16, title: 'Multi-task'});
 			writeTaskFile(tmpDir, 16, 1, 'first');

@@ -405,6 +405,13 @@ export class Orchestrator {
 					await this.git.checkoutMain();
 					return;
 				}
+
+				// Verify the agent actually deleted the task file
+				if (this.tasks.taskFileExists(task.filePath)) {
+					console.error(`Agent exited successfully but did not delete task file '${task.filePath}'. Treating as incomplete.`);
+					await this.git.checkoutMain();
+					return;
+				}
 			}
 
 			// Verify we're still on the right branch
