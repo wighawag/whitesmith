@@ -113,7 +113,7 @@ export async function handlePRComment(
 	// Commit and push any changes
 	const committed = await git.commitAll(`fix(#${config.number}): address review comment`);
 	if (committed) {
-		await git.push(pr.branch);
+		await git.forcePush(pr.branch);
 		console.log(`Changes pushed to ${pr.branch}`);
 	} else {
 		console.log('No changes to commit.');
