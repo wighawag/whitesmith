@@ -49,10 +49,27 @@ export class PiHarness implements AgentHarness {
 			);
 		}
 
-		// Check auth.json exists and has the expected provider
+		// Check for auth configuration (auth.json or models.json)
 		const homeDir = process.env.HOME || homedir();
 		const authJsonPath = path.join(homeDir, '.pi', 'agent', 'auth.json');
-		if (fs.existsSync(authJsonPath)) {
+		const modelsJsonPath = path.join(homeDir, '.pi', 'agent', 'models.json');
+		const hasAuthJson = fs.existsSync(authJsonPath);
+		const hasModelsJson = fs.existsSync(modelsJsonPath);
+
+		if (hasModelsJson) {
+			try {
+				const modelsData = JSON.parse(fs.readFileSync(modelsJsonPath, 'utf-8'));
+				const providers = Object.keys(modelsData.providers || {});
+				console.log(`Models config found at ${modelsJsonPath} with providers: ${providers.join(', ')}`);
+				if (!modelsData.providers?.[this.provider]) {
+					console.warn(
+						`WARNING: Provider '${this.provider}' not found in models.json (has: ${providers.join(', ')})`,
+					);
+				}
+			} catch (e: any) {
+				console.warn(`WARNING: Could not parse models.json: ${e.message}`);
+			}
+		} else if (hasAuthJson) {
 			try {
 				const authData = JSON.parse(fs.readFileSync(authJsonPath, 'utf-8'));
 				const providers = Object.keys(authData);
@@ -66,7 +83,7 @@ export class PiHarness implements AgentHarness {
 				console.warn(`WARNING: Could not parse auth.json: ${e.message}`);
 			}
 		} else {
-			console.warn(`WARNING: No auth.json found at ${authJsonPath}`);
+			console.warn(`WARNING: No auth configuration found (checked ${modelsJsonPath} and ${authJsonPath})`);
 		}
 
 		// Validate auth by making a minimal API call
@@ -87,9 +104,9 @@ export class PiHarness implements AgentHarness {
 				[stderr, stdout].filter(Boolean).join('\n') || error.message || 'unknown error';
 			throw new Error(
 				`Agent auth validation failed. Ensure valid credentials are configured.\n` +
-					`Set ANTHROPIC_API_KEY or configure OAuth via ~/.pi/agent/auth.json\n` +
-					`Auth file path: ${authJsonPath}\n` +
-					`Auth file exists: ${fs.existsSync(authJsonPath)}\n` +
+					`Configure providers via ~/.pi/agent/models.json or ~/.pi/agent/auth.json\n` +
+					`models.json exists: ${hasModelsJson}\n` +
+					`auth.json exists: ${hasAuthJson}\n` +
 					`HOME: ${homeDir}\n` +
 					`Details: ${details.slice(0, 800)}`,
 			);
