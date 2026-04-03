@@ -320,7 +320,7 @@ async function gatherRelatedPRs(
 	if (taskPR) {
 		context.taskPR = {
 			branch: `investigate/${issueNumber}`,
-			number: 0, // getPRForBranch doesn't return number
+			number: taskPR.number,
 			title: '',
 			state: taskPR.state,
 			url: taskPR.url,

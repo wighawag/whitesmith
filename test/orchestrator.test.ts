@@ -32,6 +32,7 @@ function createMockIssueProvider(overrides: Partial<IssueProvider> = {}): IssueP
 		createPR: vi.fn().mockResolvedValue('https://github.com/test/repo/pull/1'),
 		remoteBranchExists: vi.fn().mockResolvedValue(false),
 		getPRForBranch: vi.fn().mockResolvedValue(null),
+		mergePR: vi.fn().mockResolvedValue(undefined),
 		ensureLabels: vi.fn().mockResolvedValue(undefined),
 		listPRsByBranchPrefix: vi.fn().mockResolvedValue([]),
 		getPR: vi.fn().mockResolvedValue(null),
@@ -542,6 +543,7 @@ describe('Orchestrator', () => {
 				getPRForBranch: vi.fn().mockResolvedValue({
 					state: 'open',
 					url: 'https://github.com/test/repo/pull/99',
+					number: 99,
 				}),
 			});
 

@@ -50,7 +50,12 @@ export interface IssueProvider {
 	 */
 	getPRForBranch(
 		branch: string,
-	): Promise<{state: 'open' | 'merged' | 'closed'; url: string} | null>;
+	): Promise<{state: 'open' | 'merged' | 'closed'; url: string; number: number} | null>;
+
+	/**
+	 * Merge a pull request by number
+	 */
+	mergePR(number: number): Promise<void>;
 
 	/**
 	 * Ensure required labels exist in the repo (create if missing)

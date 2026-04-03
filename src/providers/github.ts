@@ -150,20 +150,24 @@ export class GitHubProvider implements IssueProvider {
 
 	async getPRForBranch(
 		branch: string,
-	): Promise<{state: 'open' | 'merged' | 'closed'; url: string} | null> {
+	): Promise<{state: 'open' | 'merged' | 'closed'; url: string; number: number} | null> {
 		try {
 			const raw = await this.gh(
-				`pr list --head "${branch}" --state all --json state,url --limit 1`,
+				`pr list --head "${branch}" --state all --json state,url,number --limit 1`,
 			);
 			if (!raw || raw === '[]') return null;
-			const prs = JSON.parse(raw) as Array<{state: string; url: string}>;
+			const prs = JSON.parse(raw) as Array<{state: string; url: string; number: number}>;
 			if (prs.length === 0) return null;
 			const pr = prs[0];
 			const state = pr.state.toLowerCase() as 'open' | 'merged' | 'closed';
-			return {state, url: pr.url};
+			return {state, url: pr.url, number: pr.number};
 		} catch {
 			return null;
 		}
+	}
+
+	async mergePR(number: number): Promise<void> {
+		await this.gh(`pr merge ${number} --merge --delete-branch`);
 	}
 
 	async listPRsByBranchPrefix(
