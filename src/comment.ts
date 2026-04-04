@@ -36,7 +36,7 @@ interface WhitesmithContext {
 	parentIssue?: {number: number; title: string; body: string; url: string; labels: string[]};
 	/** Task proposal PR (investigate/<N>) */
 	taskPR?: RelatedPR;
-	/** Implementation PRs (task/<N>-*) */
+	/** Implementation PR (issue/<N>) */
 	implementationPRs: RelatedPR[];
 	/** Task files on the current branch (if tasks-accepted) */
 	tasks: Array<{id: string; title: string; filePath: string}>;
@@ -209,22 +209,21 @@ export async function isPullRequest(issues: IssueProvider, number: number): Prom
  * Parse a whitesmith branch name to extract the issue number.
  *
  * - `investigate/<N>` → issue N (task proposal PR)
- * - `task/<N>-<seq>` → issue N (implementation PR)
+ * - `issue/<N>` → issue N (implementation PR)
  */
 function parseWhitesmithBranch(
 	branch: string,
-): {type: 'investigate' | 'task'; issueNumber: number; taskId?: string} | null {
+): {type: 'investigate' | 'issue'; issueNumber: number} | null {
 	const investigateMatch = branch.match(/^investigate\/(\d+)$/);
 	if (investigateMatch) {
 		return {type: 'investigate', issueNumber: parseInt(investigateMatch[1], 10)};
 	}
 
-	const taskMatch = branch.match(/^task\/(\d+)-(\d+.*)$/);
-	if (taskMatch) {
+	const issueMatch = branch.match(/^issue\/(\d+)$/);
+	if (issueMatch) {
 		return {
-			type: 'task',
-			issueNumber: parseInt(taskMatch[1], 10),
-			taskId: `${taskMatch[1]}-${taskMatch[2]}`,
+			type: 'issue',
+			issueNumber: parseInt(issueMatch[1], 10),
 		};
 	}
 
@@ -326,9 +325,17 @@ async function gatherRelatedPRs(
 		};
 	}
 
-	// Implementation PRs
-	const implPRs = await issues.listPRsByBranchPrefix(`task/${issueNumber}-`);
-	context.implementationPRs = implPRs;
+	// Implementation PR (single branch per issue)
+	const implPR = await issues.getPRForBranch(`issue/${issueNumber}`);
+	if (implPR) {
+		context.implementationPRs = [{
+			branch: `issue/${issueNumber}`,
+			number: implPR.number,
+			title: '',
+			state: implPR.state,
+			url: implPR.url,
+		}];
+	}
 }
 
 // --- Prompt builders ---
