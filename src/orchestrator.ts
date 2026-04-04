@@ -143,11 +143,19 @@ export class Orchestrator {
 	 */
 	private async decideAction(): Promise<Action> {
 		// Priority 1: Reconcile — issues with tasks-accepted where all tasks are done
+		// but no PR exists yet (safety net for crash recovery).
 		const acceptedIssues = await this.issues.listIssues({labels: [LABELS.TASKS_ACCEPTED]});
 		for (const issue of acceptedIssues) {
 			const allDone = await this.allTasksCompletedOnBranch(issue.number);
 			if (allDone) {
-				return {type: 'reconcile', issue};
+				// Only reconcile if no PR exists yet — if a PR is already open,
+				// the issue is waiting for merge and there's nothing more to do.
+				const branch = `issue/${issue.number}`;
+				const existingPR = await this.issues.getPRForBranch(branch);
+				if (!existingPR || existingPR.state === 'closed') {
+					return {type: 'reconcile', issue};
+				}
+				// PR exists and is open or merged — skip
 			}
 		}
 
@@ -228,13 +236,16 @@ export class Orchestrator {
 	}
 
 	/**
-	 * Phase 1: Reconcile — mark issue as completed, close it.
-	 * Also serves as safety net: creates PR if all tasks are done but no PR exists
+	 * Phase 1: Reconcile — safety net for crash recovery.
+	 * Creates PR if all tasks are done on the issue branch but no PR exists
 	 * (e.g. agent crashed after last task push but before PR creation).
+	 *
+	 * Does NOT close the issue — that happens when the PR is merged and the
+	 * CLI `reconcile` command detects that task files are gone from main.
 	 */
 	private async reconcile(issue: Issue): Promise<void> {
 		console.log(`Reconciling issue #${issue.number}: ${issue.title}`);
-		console.log('All tasks completed. Marking issue as done.');
+		console.log('All tasks completed on branch. Ensuring PR exists.');
 
 		// Safety net: ensure a PR exists for the issue branch
 		const branch = `issue/${issue.number}`;
@@ -255,18 +266,12 @@ export class Orchestrator {
 					body: `## Implementation for #${issue.number}\n\n${taskSummary}\n\n---\n*Implemented by whitesmith*\n\nCloses #${issue.number}`,
 				});
 				console.log(`Safety net PR created: ${prUrl}`);
+			} else {
+				console.log(`PR already exists: ${existingPR.url}`);
 			}
 		}
 
-		await this.issues.addLabel(issue.number, LABELS.COMPLETED);
-		await this.issues.removeLabel(issue.number, LABELS.TASKS_ACCEPTED);
-		await this.issues.comment(
-			issue.number,
-			`✅ All tasks for this issue have been implemented and merged. Closing.`,
-		);
-		await this.issues.closeIssue(issue.number);
-
-		console.log(`Issue #${issue.number} closed.`);
+		console.log(`Issue #${issue.number} awaiting PR merge.`);
 	}
 
 	/**

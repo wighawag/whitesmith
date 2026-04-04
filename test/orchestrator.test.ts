@@ -154,36 +154,7 @@ describe('Orchestrator', () => {
 	});
 
 	describe('reconcile', () => {
-		it('closes an issue when all tasks are done on issue branch', async () => {
-			const issue = makeIssue({number: 42, title: 'Feature X'});
-
-			const issues = createMockIssueProvider({
-				listIssues: vi
-					.fn()
-					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
-						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [issue];
-						return [];
-					}),
-				// issue/42 branch exists and has no task files (all completed)
-				remoteBranchExists: vi.fn().mockResolvedValue(true),
-			});
-
-			const agent = createMockAgent();
-			const config = createConfig(tmpDir);
-
-			// Override remotePathHasFiles to return false (no task files = all done)
-			mockRemotePathHasFiles.mockResolvedValue(false);
-
-			const orch = new Orchestrator(config, issues, agent);
-			await orch.run();
-
-			expect(issues.addLabel).toHaveBeenCalledWith(42, LABELS.COMPLETED);
-			expect(issues.removeLabel).toHaveBeenCalledWith(42, LABELS.TASKS_ACCEPTED);
-			expect(issues.closeIssue).toHaveBeenCalledWith(42);
-			expect(issues.comment).toHaveBeenCalledWith(42, expect.stringContaining('All tasks'));
-		});
-
-		it('creates safety-net PR during reconcile if none exists', async () => {
+		it('creates safety-net PR when all tasks done on branch and no PR exists', async () => {
 			const issue = makeIssue({number: 42, title: 'Feature X'});
 
 			const issues = createMockIssueProvider({
@@ -212,7 +183,43 @@ describe('Orchestrator', () => {
 					title: expect.stringContaining('#42'),
 				}),
 			);
-			expect(issues.closeIssue).toHaveBeenCalledWith(42);
+			// Should NOT close the issue — that happens on PR merge via CLI reconcile
+			expect(issues.closeIssue).not.toHaveBeenCalled();
+			expect(issues.addLabel).not.toHaveBeenCalled();
+			expect(issues.removeLabel).not.toHaveBeenCalled();
+		});
+
+		it('skips reconcile when all tasks done but PR already exists', async () => {
+			const issue = makeIssue({number: 42, title: 'Feature X'});
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [issue];
+						return [];
+					}),
+				remoteBranchExists: vi.fn().mockResolvedValue(true),
+				getPRForBranch: vi.fn().mockResolvedValue({
+					state: 'open',
+					url: 'https://github.com/test/repo/pull/99',
+					number: 99,
+				}),
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir);
+
+			// All tasks done on branch
+			mockRemotePathHasFiles.mockResolvedValue(false);
+
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Should go idle since PR exists — nothing to reconcile
+			expect(issues.closeIssue).not.toHaveBeenCalled();
+			expect(issues.createPR).not.toHaveBeenCalled();
+			expect(agent.run).not.toHaveBeenCalled();
 		});
 	});
 
@@ -619,7 +626,7 @@ describe('Orchestrator', () => {
 	});
 
 	describe('priority ordering', () => {
-		it('reconcile takes priority over implement', async () => {
+		it('reconcile takes priority over implement when no PR exists', async () => {
 			const completedIssue = makeIssue({number: 1, title: 'Done'});
 			const activeIssue = makeIssue({number: 2, title: 'Active'});
 
@@ -637,19 +644,25 @@ describe('Orchestrator', () => {
 				remoteBranchExists: vi.fn().mockImplementation(async (branch: string) => {
 					return branch === 'issue/1';
 				}),
+				// No PR for issue/1 yet (safety net scenario)
+				getPRForBranch: vi.fn().mockResolvedValue(null),
 			});
 
 			// issue/1 has no task files (all done)
 			mockRemotePathHasFiles.mockResolvedValue(false);
 
 			const agent = createMockAgent();
-			const config = createConfig(tmpDir);
+			const config = createConfig(tmpDir, {noPush: false});
 
 			const orch = new Orchestrator(config, issues, agent);
 			await orch.run();
 
-			// Should reconcile (close issue 1) rather than implement
-			expect(issues.closeIssue).toHaveBeenCalledWith(1);
+			// Should reconcile (create safety-net PR) rather than implement
+			expect(issues.createPR).toHaveBeenCalledWith(
+				expect.objectContaining({head: 'issue/1'}),
+			);
+			// Should NOT close the issue
+			expect(issues.closeIssue).not.toHaveBeenCalled();
 			expect(agent.run).not.toHaveBeenCalled();
 		});
 
