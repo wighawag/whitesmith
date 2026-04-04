@@ -385,6 +385,7 @@ export function buildCli(): Command {
 					reviewWorkflow: opts.reviewWorkflow ?? false,
 					reviewStepEnabled: opts.reviewStep !== false,
 					skipSecrets: opts.secrets === false,
+					version: pkg.version,
 				});
 			} catch (error) {
 				console.error('ERROR:', error instanceof Error ? error.message : error);

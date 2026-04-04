@@ -41,6 +41,8 @@ interface CIConfig {
 	reviewWorkflow: boolean;
 	/** When true, the review step is enabled in the main loop (whitesmith PRs are already reviewed inline). */
 	reviewStepEnabled: boolean;
+	/** whitesmith package version to pin in npm install. */
+	version: string;
 }
 
 /**
@@ -378,12 +380,12 @@ ${indent(modelsJsonStr, 8)}
       uses: actions/cache@v4
       with:
         path: \${{ steps.npm-prefix.outputs.dir }}
-        key: whitesmith-\${{ runner.os }}-v1
+        key: whitesmith-\${{ runner.os }}-${config.version}
 
     - name: Install whitesmith and pi
       if: steps.npm-cache.outputs.cache-hit != 'true'
       shell: bash
-      run: npm install -g whitesmith @mariozechner/pi-coding-agent`;
+      run: npm install -g whitesmith@${config.version} @mariozechner/pi-coding-agent`;
 	}
 
 	return `\
@@ -883,6 +885,8 @@ export interface InstallCIOptions {
 	reviewStepEnabled?: boolean;
 	/** Skip setting GitHub secrets (useful when reconfiguring workflows only). */
 	skipSecrets?: boolean;
+	/** whitesmith package version to pin in the install command. */
+	version: string;
 }
 
 /**
@@ -1009,6 +1013,7 @@ export async function installGitHubCI(
 		dev,
 		reviewWorkflow,
 		reviewStepEnabled,
+		version: options.version,
 	};
 
 	// ── Set GitHub secrets via gh CLI ─────────────────────────────────────
