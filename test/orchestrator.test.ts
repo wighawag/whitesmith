@@ -1153,19 +1153,21 @@ describe('Orchestrator', () => {
 			const issues = createMockIssueProvider({
 				getIssue: vi.fn().mockResolvedValue(issue),
 				remoteBranchExists: vi.fn().mockResolvedValue(true),
+				getPRForBranch: vi.fn().mockResolvedValue(null),
 			});
 
 			// No task files on the issue branch = all done
 			mockRemotePathHasFiles.mockResolvedValue(false);
 
 			const agent = createMockAgent();
-			const config = createConfig(tmpDir, {issueNumber: 42, maxIterations: 1});
+			const config = createConfig(tmpDir, {issueNumber: 42, maxIterations: 1, noPush: false});
 			const orch = new Orchestrator(config, issues, agent);
 			await orch.run();
 
-			expect(issues.addLabel).toHaveBeenCalledWith(42, LABELS.COMPLETED);
-			expect(issues.removeLabel).toHaveBeenCalledWith(42, LABELS.TASKS_ACCEPTED);
-			expect(issues.closeIssue).toHaveBeenCalledWith(42);
+			// Reconcile only ensures a PR exists — it does NOT close the issue.
+			// Issue closing happens via the CLI `reconcile` command after the PR is merged.
+			expect(issues.createPR).toHaveBeenCalled();
+			expect(issues.closeIssue).not.toHaveBeenCalled();
 		});
 
 		it('clears stale investigating label and re-investigates', async () => {
