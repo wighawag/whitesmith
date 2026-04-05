@@ -657,7 +657,7 @@ name: whitesmith-issue
 
 on:
   issues:
-    types: [opened]
+    types: [opened, edited]
 
 env:
 ${envBlock}
@@ -673,6 +673,10 @@ permissions:
 
 jobs:
   run:
+    if: >-
+      github.event.action == 'opened' ||
+      (github.event.action == 'edited' &&
+       contains(join(github.event.issue.labels.*.name, ','), 'whitesmith:needs-clarification'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

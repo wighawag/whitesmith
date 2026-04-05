@@ -1,4 +1,4 @@
-export {Orchestrator} from './orchestrator.js';
+export {Orchestrator, checkForAmbiguity} from './orchestrator.js';
 export {TaskManager} from './task-manager.js';
 export {GitManager} from './git.js';
 export {
@@ -17,5 +17,5 @@ export {GitHubProvider} from './providers/github.js';
 export type {AgentHarness} from './harnesses/agent-harness.js';
 export {PiHarness} from './harnesses/pi.js';
 
-export type {Issue, Task, TaskFrontmatter, DevPulseConfig, Action} from './types.js';
+export type {Issue, Task, TaskFrontmatter, DevPulseConfig, Action, InvestigateResult} from './types.js';
 export {LABELS} from './types.js';

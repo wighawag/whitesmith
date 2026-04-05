@@ -232,6 +232,26 @@ export class GitHubProvider implements IssueProvider {
 		}
 	}
 
+	/**
+	 * List comments on an issue.
+	 *
+	 * Uses `gh issue view --json comments` and parses the JSON in TypeScript.
+	 * For issues with many comments this fetches all of them, but for the
+	 * ambiguity-cycle feature (≤3 bot comments) this is acceptable.
+	 */
+	async listComments(number: number): Promise<Array<{author: string; body: string}>> {
+		const raw = await this.gh(`issue view ${number} --json comments`);
+		if (!raw) return [];
+		const parsed = JSON.parse(raw) as {
+			comments: Array<{author: {login: string}; body: string}>;
+		};
+		if (!parsed.comments || !Array.isArray(parsed.comments)) return [];
+		return parsed.comments.map((c) => ({
+			author: c.author.login,
+			body: c.body,
+		}));
+	}
+
 	async ensureLabels(labels: string[]): Promise<void> {
 		for (const label of labels) {
 			try {

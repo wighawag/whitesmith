@@ -70,6 +70,11 @@ export interface IssueProvider {
 	): Promise<Array<{branch: string; number: number; title: string; state: string; url: string}>>;
 
 	/**
+	 * List comments on an issue
+	 */
+	listComments(number: number): Promise<Array<{author: string; body: string}>>;
+
+	/**
 	 * Get PR details by number (branch, state, body, etc.)
 	 */
 	getPR(number: number): Promise<{

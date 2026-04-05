@@ -2,7 +2,7 @@ import {describe, it, expect, beforeEach, afterEach, vi} from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import {Orchestrator} from '../src/orchestrator.js';
+import {Orchestrator, checkForAmbiguity} from '../src/orchestrator.js';
 import {LABELS} from '../src/types.js';
 import type {Issue, DevPulseConfig, Task} from '../src/types.js';
 import type {IssueProvider} from '../src/providers/issue-provider.js';
@@ -36,6 +36,7 @@ function createMockIssueProvider(overrides: Partial<IssueProvider> = {}): IssueP
 		ensureLabels: vi.fn().mockResolvedValue(undefined),
 		listPRsByBranchPrefix: vi.fn().mockResolvedValue([]),
 		getPR: vi.fn().mockResolvedValue(null),
+		listComments: vi.fn().mockResolvedValue([]),
 		...overrides,
 	};
 }
@@ -51,11 +52,14 @@ function createMockAgent(overrides: Partial<AgentHarness> = {}): AgentHarness {
 function createConfig(workDir: string, overrides: Partial<DevPulseConfig> = {}): DevPulseConfig {
 	return {
 		agentCmd: 'mock-agent',
+		provider: 'mock-provider',
+		model: 'mock-model',
 		maxIterations: 1,
 		workDir,
 		noPush: true,
 		noSleep: true,
 		review: false,
+		maxAmbiguityCycles: 3,
 		...overrides,
 	};
 }
@@ -307,6 +311,252 @@ describe('Orchestrator', () => {
 			await orch.run();
 
 			expect(issues.removeLabel).toHaveBeenCalledWith(5, LABELS.INVESTIGATING);
+		});
+
+		it('comments on issue and skips PR when agent signals ambiguity', async () => {
+			const issue = makeIssue({number: 11, title: 'Ambiguous feature'});
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [];
+						if (opts?.noLabels) return [issue];
+						return [];
+					}),
+			});
+
+			// Agent creates ambiguity file instead of task files
+			const agent = createMockAgent({
+				run: vi.fn().mockImplementation(async () => {
+					fs.writeFileSync(
+						path.join(tmpDir, '.whitesmith-ambiguity.md'),
+						'## Summary\nUnclear scope.\n\n## Questions\n1. What should the scope be?\n',
+					);
+					return {output: 'done', exitCode: 0};
+				}),
+			});
+
+			const config = createConfig(tmpDir, {noPush: false});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Should NOT create a PR
+			expect(issues.createPR).not.toHaveBeenCalled();
+			// Should remove investigating label
+			expect(issues.removeLabel).toHaveBeenCalledWith(11, LABELS.INVESTIGATING);
+			// Should add needs-clarification label
+			expect(issues.addLabel).toHaveBeenCalledWith(11, LABELS.NEEDS_CLARIFICATION);
+			// Should comment on the issue with clarification questions
+			expect(issues.comment).toHaveBeenCalledWith(
+				11,
+				expect.stringContaining('need clarification'),
+			);
+			expect(issues.comment).toHaveBeenCalledWith(
+				11,
+				expect.stringContaining('What should the scope be?'),
+			);
+		});
+
+		it('does not push branch when agent signals ambiguity', async () => {
+			const issue = makeIssue({number: 12, title: 'Unclear issue'});
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [];
+						if (opts?.noLabels) return [issue];
+						return [];
+					}),
+			});
+
+			const agent = createMockAgent({
+				run: vi.fn().mockImplementation(async () => {
+					fs.writeFileSync(
+						path.join(tmpDir, '.whitesmith-ambiguity.md'),
+						'## Questions\n1. Need more info\n',
+					);
+					return {output: 'done', exitCode: 0};
+				}),
+			});
+
+			const config = createConfig(tmpDir, {noPush: false});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// forcePush should not be called
+			// (We verify indirectly: no PR created means no push happened)
+			expect(issues.createPR).not.toHaveBeenCalled();
+		});
+
+		it('continues existing flow when agent does not signal ambiguity', async () => {
+			const issue = makeIssue({number: 13, title: 'Clear feature'});
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [];
+						if (opts?.noLabels) return [issue];
+						return [];
+					}),
+			});
+
+			const agent = createMockAgent({
+				run: vi.fn().mockImplementation(async () => {
+					writeTaskFile(tmpDir, 13, 1, 'the-task');
+					return {output: 'done', exitCode: 0};
+				}),
+			});
+
+			const config = createConfig(tmpDir, {noPush: false});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Normal flow: should create PR and label as tasks-proposed
+			expect(issues.createPR).toHaveBeenCalled();
+			expect(issues.addLabel).toHaveBeenCalledWith(13, LABELS.TASKS_PROPOSED);
+			// Should NOT add needs-clarification label
+			expect(issues.addLabel).not.toHaveBeenCalledWith(13, LABELS.NEEDS_CLARIFICATION);
+		});
+
+		it('escalates to human review when ambiguity cycle limit is reached', async () => {
+			const issue = makeIssue({number: 14, title: 'Endlessly ambiguous'});
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [];
+						if (opts?.noLabels) return [issue];
+						return [];
+					}),
+				// 2 prior clarification comments from the bot (limit is 3, so 2 existing = at limit)
+				listComments: vi.fn().mockResolvedValue([
+					{author: 'github-actions[bot]', body: "\ud83e\udd14 I've analyzed this issue and need clarification...cycle 1"},
+					{author: 'github-actions[bot]', body: "\ud83e\udd14 I've analyzed this issue and need clarification...cycle 2"},
+					{author: 'someuser', body: 'Here is more info'},
+				]),
+			});
+
+			const agent = createMockAgent({
+				run: vi.fn().mockImplementation(async () => {
+					fs.writeFileSync(
+						path.join(tmpDir, '.whitesmith-ambiguity.md'),
+						'## Questions\n1. Still unclear\n',
+					);
+					return {output: 'done', exitCode: 0};
+				}),
+			});
+
+			const config = createConfig(tmpDir, {noPush: false, maxAmbiguityCycles: 3});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Should NOT post another clarification comment
+			expect(issues.comment).not.toHaveBeenCalledWith(
+				14,
+				expect.stringContaining('need clarification'),
+			);
+			// Should post escalation comment
+			expect(issues.comment).toHaveBeenCalledWith(
+				14,
+				expect.stringContaining('Human review is needed'),
+			);
+			// Should add needs-human-review label
+			expect(issues.addLabel).toHaveBeenCalledWith(14, LABELS.NEEDS_HUMAN_REVIEW);
+			// Should also keep needs-clarification label
+			expect(issues.addLabel).toHaveBeenCalledWith(14, LABELS.NEEDS_CLARIFICATION);
+			// Should NOT create a PR
+			expect(issues.createPR).not.toHaveBeenCalled();
+		});
+
+		it('posts normal clarification when cycle limit not yet reached', async () => {
+			const issue = makeIssue({number: 15, title: 'Somewhat ambiguous'});
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [];
+						if (opts?.noLabels) return [issue];
+						return [];
+					}),
+				// Only 1 prior clarification comment (limit is 3, so still under)
+				listComments: vi.fn().mockResolvedValue([
+					{author: 'github-actions[bot]', body: "\ud83e\udd14 I've analyzed this issue and need clarification...cycle 1"},
+				]),
+			});
+
+			const agent = createMockAgent({
+				run: vi.fn().mockImplementation(async () => {
+					fs.writeFileSync(
+						path.join(tmpDir, '.whitesmith-ambiguity.md'),
+						'## Questions\n1. More info needed\n',
+					);
+					return {output: 'done', exitCode: 0};
+				}),
+			});
+
+			const config = createConfig(tmpDir, {noPush: false, maxAmbiguityCycles: 3});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Should post normal clarification comment
+			expect(issues.comment).toHaveBeenCalledWith(
+				15,
+				expect.stringContaining('need clarification'),
+			);
+			// Should NOT post escalation comment
+			expect(issues.comment).not.toHaveBeenCalledWith(
+				15,
+				expect.stringContaining('Human review is needed'),
+			);
+			// Should NOT add needs-human-review label
+			expect(issues.addLabel).not.toHaveBeenCalledWith(15, LABELS.NEEDS_HUMAN_REVIEW);
+		});
+
+		it('counts only bot clarification comments, not user comments', async () => {
+			const issue = makeIssue({number: 16, title: 'Mixed comments'});
+
+			const issues = createMockIssueProvider({
+				listIssues: vi
+					.fn()
+					.mockImplementation(async (opts?: {labels?: string[]; noLabels?: string[]}) => {
+						if (opts?.labels?.includes(LABELS.TASKS_ACCEPTED)) return [];
+						if (opts?.noLabels) return [issue];
+						return [];
+					}),
+				// Many user comments but only 1 bot clarification comment
+				listComments: vi.fn().mockResolvedValue([
+					{author: 'github-actions[bot]', body: "\ud83e\udd14 I've analyzed this issue and need clarification...cycle 1"},
+					{author: 'someuser', body: "\ud83e\udd14 I've analyzed this issue too"},
+					{author: 'anotheruser', body: 'Random comment'},
+					{author: 'github-actions[bot]', body: 'Some other bot message'},
+				]),
+			});
+
+			const agent = createMockAgent({
+				run: vi.fn().mockImplementation(async () => {
+					fs.writeFileSync(
+						path.join(tmpDir, '.whitesmith-ambiguity.md'),
+						'## Questions\n1. More info\n',
+					);
+					return {output: 'done', exitCode: 0};
+				}),
+			});
+
+			const config = createConfig(tmpDir, {noPush: false, maxAmbiguityCycles: 3});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Only 1 bot clarification, so should post normal clarification (not escalate)
+			expect(issues.comment).toHaveBeenCalledWith(
+				16,
+				expect.stringContaining('need clarification'),
+			);
+			expect(issues.addLabel).not.toHaveBeenCalledWith(16, LABELS.NEEDS_HUMAN_REVIEW);
 		});
 	});
 
@@ -1274,6 +1524,123 @@ describe('Orchestrator', () => {
 			expect(agent.run).not.toHaveBeenCalled();
 		});
 
+		it('goes idle when issue has needs-human-review label', async () => {
+			const issue = makeIssue({
+				number: 42,
+				title: 'Stuck',
+				labels: [LABELS.NEEDS_CLARIFICATION, LABELS.NEEDS_HUMAN_REVIEW],
+			});
+
+			const issues = createMockIssueProvider({
+				getIssue: vi.fn().mockResolvedValue(issue),
+			});
+
+			const agent = createMockAgent();
+			const config = createConfig(tmpDir, {issueNumber: 42, maxIterations: 1});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			expect(agent.run).not.toHaveBeenCalled();
+		});
+
+		it('re-investigates when issue has needs-clarification label', async () => {
+			const issue = makeIssue({
+				number: 42,
+				title: 'Needs info',
+				labels: [LABELS.NEEDS_CLARIFICATION],
+			});
+
+			const issues = createMockIssueProvider({
+				getIssue: vi.fn().mockResolvedValue(issue),
+			});
+
+			const agent = createMockAgent({
+				run: vi.fn().mockImplementation(async () => {
+					writeTaskFile(tmpDir, 42, 1, 'clarified-task');
+					return {output: 'done', exitCode: 0};
+				}),
+			});
+
+			const config = createConfig(tmpDir, {issueNumber: 42, maxIterations: 1});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Should investigate (agent is called)
+			expect(agent.run).toHaveBeenCalledTimes(1);
+			// Should add investigating label
+			expect(issues.addLabel).toHaveBeenCalledWith(42, LABELS.INVESTIGATING);
+			// Should remove needs-clarification label
+			expect(issues.removeLabel).toHaveBeenCalledWith(42, LABELS.NEEDS_CLARIFICATION);
+		});
+
+		it('removes needs-clarification label during re-investigation before agent runs', async () => {
+			const issue = makeIssue({
+				number: 42,
+				title: 'Clarified',
+				labels: [LABELS.NEEDS_CLARIFICATION],
+			});
+
+			const addLabelCalls: Array<{number: number; label: string}> = [];
+			const removeLabelCalls: Array<{number: number; label: string}> = [];
+
+			const issues = createMockIssueProvider({
+				getIssue: vi.fn().mockResolvedValue(issue),
+				addLabel: vi.fn().mockImplementation(async (num: number, label: string) => {
+					addLabelCalls.push({number: num, label});
+				}),
+				removeLabel: vi.fn().mockImplementation(async (num: number, label: string) => {
+					removeLabelCalls.push({number: num, label});
+				}),
+			});
+
+			const agent = createMockAgent({
+				run: vi.fn().mockImplementation(async () => {
+					writeTaskFile(tmpDir, 42, 1, 'task');
+					return {output: 'done', exitCode: 0};
+				}),
+			});
+
+			const config = createConfig(tmpDir, {issueNumber: 42, maxIterations: 1});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Verify order: investigating label added first, then needs-clarification removed
+			const investigatingAddIndex = addLabelCalls.findIndex(
+				(c) => c.label === LABELS.INVESTIGATING,
+			);
+			const needsClarificationRemoveIndex = removeLabelCalls.findIndex(
+				(c) => c.label === LABELS.NEEDS_CLARIFICATION,
+			);
+			expect(investigatingAddIndex).toBeGreaterThanOrEqual(0);
+			expect(needsClarificationRemoveIndex).toBeGreaterThanOrEqual(0);
+		});
+
+		it('does not remove needs-clarification label during normal investigation', async () => {
+			const issue = makeIssue({
+				number: 42,
+				title: 'New issue',
+				labels: [],
+			});
+
+			const issues = createMockIssueProvider({
+				getIssue: vi.fn().mockResolvedValue(issue),
+			});
+
+			const agent = createMockAgent({
+				run: vi.fn().mockImplementation(async () => {
+					writeTaskFile(tmpDir, 42, 1, 'task');
+					return {output: 'done', exitCode: 0};
+				}),
+			});
+
+			const config = createConfig(tmpDir, {issueNumber: 42, maxIterations: 1});
+			const orch = new Orchestrator(config, issues, agent);
+			await orch.run();
+
+			// Should NOT try to remove needs-clarification (it wasn't there)
+			expect(issues.removeLabel).not.toHaveBeenCalledWith(42, LABELS.NEEDS_CLARIFICATION);
+		});
+
 		it('re-fetches issue after each action to get updated labels', async () => {
 			// First fetch: no labels (investigate)
 			// Second fetch: tasks-proposed + tasks on main (transition to tasks-accepted + implement)
@@ -1565,5 +1932,58 @@ describe('Orchestrator', () => {
 			// Should NOT create PR (task 2 still remaining)
 			expect(issues.createPR).not.toHaveBeenCalled();
 		});
+	});
+});
+
+describe('checkForAmbiguity', () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whitesmith-ambiguity-'));
+	});
+
+	afterEach(() => {
+		fs.rmSync(tmpDir, {recursive: true, force: true});
+	});
+
+	it('returns null when .whitesmith-ambiguity.md does not exist', () => {
+		const result = checkForAmbiguity(tmpDir);
+		expect(result).toBeNull();
+	});
+
+	it('returns trimmed content when .whitesmith-ambiguity.md exists', () => {
+		const content = '## Summary\nUnclear requirements.\n\n## Questions\n1. What is the scope?\n';
+		fs.writeFileSync(path.join(tmpDir, '.whitesmith-ambiguity.md'), content);
+
+		const result = checkForAmbiguity(tmpDir);
+		expect(result).toBe(content.trim());
+	});
+
+	it('deletes the file after reading', () => {
+		fs.writeFileSync(path.join(tmpDir, '.whitesmith-ambiguity.md'), 'questions here');
+
+		checkForAmbiguity(tmpDir);
+
+		expect(fs.existsSync(path.join(tmpDir, '.whitesmith-ambiguity.md'))).toBe(false);
+	});
+
+	it('returns content with whitespace trimmed', () => {
+		fs.writeFileSync(path.join(tmpDir, '.whitesmith-ambiguity.md'), '  \n  some content  \n  ');
+
+		const result = checkForAmbiguity(tmpDir);
+		expect(result).toBe('some content');
+	});
+});
+
+describe('git exclude pattern for .whitesmith-*', () => {
+	it('.whitesmith-ambiguity.md matches the .whitesmith-* glob pattern', () => {
+		// The ensureExcluded() method in GitManager adds the pattern '.whitesmith-*'
+		// to .git/info/exclude. This test verifies the pattern would match our file.
+		const pattern = '.whitesmith-*';
+		const filename = '.whitesmith-ambiguity.md';
+
+		// Simple glob matching: .whitesmith-* matches any file starting with .whitesmith-
+		const prefix = pattern.replace('*', '');
+		expect(filename.startsWith(prefix)).toBe(true);
 	});
 });

@@ -52,6 +52,7 @@ export function buildCli(): Command {
 		.option('--auto-work', 'Enable auto-work mode (auto-approve task PRs)')
 		.option('--no-review', 'Disable review step after PRs are created')
 		.option('--issue <number>', 'Target a single issue number (run full pipeline for it)')
+		.option('--max-ambiguity-cycles <n>', 'Max ambiguity cycles before escalating to human review', '3')
 		.action(async (workDir: string, opts) => {
 			const config: DevPulseConfig = {
 				agentCmd: opts.agentCmd,
@@ -67,6 +68,7 @@ export function buildCli(): Command {
 				logFile: opts.logFile,
 				repo: opts.repo,
 				issueNumber: opts.issue ? parseInt(opts.issue, 10) : undefined,
+				maxAmbiguityCycles: parseInt(opts.maxAmbiguityCycles, 10),
 			};
 
 			if (!fs.existsSync(config.workDir)) {

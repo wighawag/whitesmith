@@ -56,6 +56,27 @@ depends_on: []
 - Consider the existing codebase patterns and conventions.
 - Create the \`${issueTasksDir}\` directory if it doesn't exist.
 
+## Ambiguity Escape Hatch
+
+If the issue is **ambiguous, unclear, or needs more information** before you can break it into tasks:
+
+1. **Do NOT create any task files.**
+2. **Do NOT commit anything.**
+3. Instead, write a file called \`.whitesmith-ambiguity.md\` in the repository root with the following structure:
+
+\`\`\`markdown
+## Summary
+<Brief summary of what you understood from the issue>
+
+## Questions
+1. <Specific question or clarification needed>
+2. <Another question>
+\`\`\`
+
+The file should contain a brief summary of what was understood, followed by numbered questions that need to be answered before tasks can be generated.
+
+Only use this escape hatch when the issue genuinely lacks enough information to produce meaningful tasks. If the issue is reasonably clear, generate tasks as described above.
+
 ## When Done
 
 After creating all task files, commit your changes:
@@ -305,6 +326,38 @@ Use markdown formatting. Be thorough but constructive.
 Do NOT modify any files other than \`${args.responseFile}\`.
 Do NOT commit, push, or create PRs.
 `;
+}
+
+/**
+ * Build the escalation comment posted when the ambiguity cycle limit has been reached.
+ * Tells the human to review the issue manually.
+ */
+export function buildEscalationComment(): string {
+	return `⚠️ This issue has gone through multiple clarification cycles without reaching a clear task breakdown.
+
+**Human review is needed.** Please:
+1. Review the issue description and previous clarification attempts
+2. Either update the issue with more detail or break it down manually
+3. Remove the \`whitesmith:needs-human-review\` and \`whitesmith:needs-clarification\` labels when ready for the agent to retry
+
+_This issue will not be auto-investigated until the labels are removed._`;
+}
+
+/**
+ * Build the comment posted on an issue when the agent signals ambiguity.
+ * Includes the agent's clarification questions and instructions for the user.
+ */
+export function buildClarificationComment(clarificationText: string): string {
+	return `🤔 I've analyzed this issue and need clarification before generating implementation tasks:
+
+${clarificationText.trim()}
+
+---
+
+**How to respond:**
+**Edit this issue** — update the description with the missing details.
+
+I'll automatically re-analyze when the issue description is updated.`;
 }
 
 /**

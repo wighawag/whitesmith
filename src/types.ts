@@ -58,6 +58,10 @@ export const LABELS = {
 	COMPLETED: 'whitesmith:completed',
 	/** Auto-work mode: auto-approve task PRs */
 	AUTO_WORK: 'whitesmith:auto-work',
+	/** Issue needs clarification before tasks can be generated */
+	NEEDS_CLARIFICATION: 'whitesmith:needs-clarification',
+	/** Issue needs human review after repeated ambiguity cycles */
+	NEEDS_HUMAN_REVIEW: 'whitesmith:needs-human-review',
 } as const;
 
 /**
@@ -90,7 +94,17 @@ export interface DevPulseConfig {
 	repo?: string;
 	/** Target a single issue number (single-issue run mode) */
 	issueNumber?: number;
+	/** Maximum ambiguity cycles before escalating to human review (default: 3) */
+	maxAmbiguityCycles?: number;
 }
+
+/**
+ * Result of the investigate phase.
+ * Either tasks were generated, or the agent signaled ambiguity.
+ */
+export type InvestigateResult =
+	| { outcome: 'tasks'; taskCount: number }
+	| { outcome: 'ambiguous'; clarificationComment: string };
 
 /**
  * What the orchestrator should do next
