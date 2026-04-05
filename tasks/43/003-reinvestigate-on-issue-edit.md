@@ -7,31 +7,11 @@ depends_on: ["43-002"]
 
 ## Description
 
-Add a workflow trigger and orchestrator logic to re-investigate an issue when the user provides clarification by editing the issue body. **Only issue edits trigger re-investigation — comment-based re-investigation is not supported.**
+Add orchestrator logic to re-investigate an issue when the user provides clarification by editing the issue body. **Only issue edits trigger re-investigation — comment-based re-investigation is not supported.**
 
-### 1. GitHub Actions workflow changes
+> **Note:** Workflow trigger changes (adding `issues.edited` to the GitHub Actions workflow) are handled in **task 005** via `install-ci` / `generateIssueWorkflow()`. Do **NOT** modify any files under `.github/workflows/` in this task.
 
-**`.github/workflows/whitesmith-issue.yml`** — Currently triggers only on `issues.opened`. Add `issues.edited` as a trigger:
-
-```yaml
-on:
-  issues:
-    types: [opened, edited]
-```
-
-Add a condition to the job: on `edited` events, only run if the issue has the `whitesmith:needs-clarification` label (to avoid re-investigating every issue edit):
-
-```yaml
-jobs:
-  run:
-    if: >-
-      github.event.action == 'opened' ||
-      (github.event.action == 'edited' &&
-       contains(join(github.event.issue.labels.*.name, ','), 'whitesmith:needs-clarification'))
-    runs-on: ubuntu-latest
-```
-
-### 2. Orchestrator changes
+### 1. Orchestrator changes
 
 **`decideActionForIssue()`** — Update the behavior for `needs-clarification` from `idle` (set in 43-002) to `investigate`. When an issue has the `needs-clarification` label, return `{type: 'investigate', issue}` so the full investigation flow runs again. **Update the test from 43-002 that asserted idle behavior to now assert investigate behavior.**
 
@@ -40,7 +20,7 @@ jobs:
 2. Check and remove `needs-clarification` label if present (new)
 3. Proceed with agent run
 
-### 3. No changes to CLI, prompt, or comment workflow
+### 2. No changes to CLI, prompt, or comment workflow
 
 Since re-investigation is triggered only by issue edits:
 - No `--comment-body` or `--comment-body-file` CLI flags are needed
@@ -50,14 +30,11 @@ Since re-investigation is triggered only by issue edits:
 
 ### Files to modify
 
-- `.github/workflows/whitesmith-issue.yml` — Add `edited` trigger with label filter condition on the job.
 - `src/orchestrator.ts` — Update `decideActionForIssue()` to return `investigate` for `needs-clarification` issues. Update `investigate()` to remove `needs-clarification` label at the start.
 - `test/orchestrator.test.ts` — Update the test from 43-002 for `needs-clarification` idle behavior to now assert `investigate` behavior. Add tests for label removal during re-investigation.
 
 ## Acceptance Criteria
 
-- Issue edit triggers the whitesmith-issue workflow when issue has `needs-clarification` label
-- Issue edit does NOT trigger the workflow for issues without `needs-clarification` label
 - `decideActionForIssue()` returns `{type: 'investigate', issue}` for `needs-clarification` issues
 - The `needs-clarification` label is removed at the start of `investigate()` when present
 - The re-investigation uses the updated issue body (no special context passing needed — standard issue fetch gets the latest body)
@@ -66,10 +43,9 @@ Since re-investigation is triggered only by issue edits:
   - `decideActionForIssue` returns `investigate` for `needs-clarification` issues
   - `investigate()` removes the `needs-clarification` label when present
   - Normal investigate flow (no `needs-clarification` label) is unchanged
-- Workflow file has correct trigger conditions and filtering
+- **No files under `.github/workflows/` are modified** (workflow changes are in task 005)
 
 ## Implementation Notes
 
-- For the workflow condition, use `contains(join(github.event.issue.labels.*.name, ','), 'whitesmith:needs-clarification')` to check the label.
-- The workflow concurrency group `whitesmith-issue-${{ github.event.issue.number }}` already handles preventing concurrent runs for the same issue — the `edited` trigger reuses the same group.
 - Since the `whitesmith run --issue N` command fetches the issue fresh, the updated description is automatically available without any special passing.
+- The workflow concurrency group `whitesmith-issue-${{ github.event.issue.number }}` already handles preventing concurrent runs for the same issue — the `edited` trigger (added in task 005) reuses the same group.
