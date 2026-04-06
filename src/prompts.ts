@@ -17,9 +17,10 @@ ${issue.body}
 ## Your Job
 
 You are an AI assistant helping break down a GitHub issue into concrete implementation tasks.
+**Important:** The agent implementing these tasks will start with a fresh context — no knowledge of the issue discussion or your investigation. Each task must be **fully self-contained** with enough detail that the implementer can work without guessing.
 
 1. **Read and understand** the issue above.
-2. **Explore the codebase** to understand the architecture, conventions, and relevant code.
+2. **Explore the codebase thoroughly** to understand the architecture, conventions, and relevant code. Identify the specific files, functions, and patterns that will need to change.
 3. **Break the issue down** into 1 or more tasks. Each task should represent a single, reviewable PR's worth of work.
 4. **Write task files** to the \`${issueTasksDir}\` directory.
 
@@ -36,14 +37,22 @@ depends_on: []
 ---
 
 ## Description
-<detailed description of what needs to be done>
+<Detailed description of what needs to be done. Include:
+- The specific behavior to add/change/fix and WHY
+- Which files and functions to modify (use exact paths from your codebase exploration)
+- How the change fits into the existing architecture
+- Any edge cases or constraints to handle>
 
 ## Acceptance Criteria
-- <criterion 1>
-- <criterion 2>
+- <Specific, verifiable criterion — e.g., "calling X with Y returns Z" not "works correctly">
+- <Another criterion>
 
 ## Implementation Notes
-<any relevant notes about approach, files to modify, etc.>
+<Concrete guidance for the implementer:
+- Exact file paths to create or modify
+- Existing patterns or utilities to reuse (with file paths)
+- Code snippets or signatures when helpful for clarity
+- Any gotchas, non-obvious conventions, or things to avoid>
 \`\`\`
 
 ## Rules
@@ -52,7 +61,12 @@ depends_on: []
 - The \`id\` field must be \`"${issue.number}-<seq>"\` (e.g., "${issue.number}-001").
 - Use \`depends_on\` to list task IDs that must be completed before this task. For example, if task 002 depends on task 001, set \`depends_on: ["${issue.number}-001"]\`.
 - Each task should be a meaningful, self-contained unit of work that results in one PR.
-- Be specific in descriptions and acceptance criteria — another AI agent will implement these.
+- **Be extremely specific.** The implementing agent starts with zero context. Include:
+  - Exact file paths discovered during your codebase exploration
+  - Function/class names to modify or create
+  - Existing patterns to follow (reference specific files as examples)
+  - Expected behavior changes with concrete examples
+- Acceptance criteria must be **verifiable** — not vague ("works correctly") but testable ("function X returns Y when given Z").
 - Consider the existing codebase patterns and conventions.
 - Create the \`${issueTasksDir}\` directory if it doesn't exist.
 
@@ -75,7 +89,13 @@ If the issue is **ambiguous, unclear, or needs more information** before you can
 
 The file should contain a brief summary of what was understood, followed by numbered questions that need to be answered before tasks can be generated.
 
-Only use this escape hatch when the issue genuinely lacks enough information to produce meaningful tasks. If the issue is reasonably clear, generate tasks as described above.
+**When to use this escape hatch:** If you find yourself needing to make significant assumptions about the desired behavior, scope, or approach — ask rather than guess. Specifically:
+- The issue describes a problem but not the desired solution, and multiple valid approaches exist
+- Key details are missing (e.g., which API format, what error behavior, which edge cases matter)
+- The issue references context you cannot find in the codebase
+- You cannot produce acceptance criteria that are concrete and verifiable without guessing
+
+If the issue is reasonably clear and you can produce detailed, actionable tasks, generate them.
 
 ## When Done
 
